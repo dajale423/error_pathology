@@ -547,7 +547,6 @@ def get_feature_data(
     model: HookedTransformer,
     hook_point: str,
     hook_point_layer: int,
-    hook_point_head_index: Optional[int],
     tokens: Int[Tensor, "batch seq"],
     feature_idx: Union[int, List[int]],
     max_batch_size: Optional[int] = None,
@@ -612,7 +611,7 @@ def get_feature_data(
     elif "hook_q" in hook_point:
         # unembed proj onto residual stream
         feature_mlp_out_dir = (
-            feature_out_dir @ model.W_Q[hook_point_layer, hook_point_head_index].T
+            feature_out_dir @ model.W_Q[hook_point_layer].T
         )  # (feats, d_model)ß
 
     assert (
