@@ -8,36 +8,72 @@ import torch.nn.functional as F
 from transformer_lens import utils
 
 
-def reconstruction_hook(activation, hook, sae_out):
-    activation[:] = sae_out
+def cos_sim(a, b):
+    return einops.einsum(
+        a, 
+        b, 
+        "batch seq dim, batch seq dim -> batch seq"
+    ) / (a.norm(dim=-1) * b.norm(dim=-1))
+
+
+def reconstruction_hook(activation, hook, sae_out, pos=None):
+    # print("reconstruction l2 norm", (activation - sae_out).norm(dim=-1)[-3:, -3:])
+    # print("reconstruction cos sim", cos_sim(activation, sae_out)[-3:, -3:])
+    if pos is None:
+        activation[:] = sae_out
+    else:
+        activation[:, pos] = sae_out[:, pos]
+        
     return activation
 
 
-def reconstruction_w_norm_correction_hook(activation, hook, sae_out):
+def reconstruction_w_norm_correction_hook(activation, hook, sae_out, pos=None):
     activation_norm = activation.norm(dim=-1, keepdim=True)
     sae_out_norm = sae_out.norm(dim=-1, keepdim=True)
-    activation[:] = sae_out * (activation_norm / sae_out_norm)
+    corrected_activation = sae_out * (activation_norm / sae_out_norm)
+    
+    if pos is None:
+        activation[:] = corrected_activation
+    else:
+        activation[:, pos] = corrected_activation[:, pos]
+    
     return activation
 
 
-def reconstruction_w_cos_correction_hook(activation, hook, sae_out):
+def reconstruction_w_cos_correction_hook(activation, hook, sae_out, pos=None):
     activation_norm = activation.norm(dim=-1, keepdim=True)
     sae_out_norm = sae_out.norm(dim=-1, keepdim=True)
-    activation[:] = activation * (sae_out_norm / activation_norm)
+    corrected_activation = activation * (sae_out_norm / activation_norm)
+    
+    if pos is None:
+        activation[:] = corrected_activation
+    else:
+        activation[:, pos] = corrected_activation[:, pos]
+    
     return activation
     
 
-def l2_error_preserving_perturbation_hook(activation, hook, sae_out):
+def l2_error_preserving_perturbation_hook(activation, hook, sae_out, pos=None):
     error = (sae_out - activation).norm(dim=-1)
     perturbation = torch.randn_like(activation)
     normalized_perturbation = (
         perturbation / perturbation.norm(dim=-1, keepdim=True)
         ) * error.unsqueeze(-1)
     
-    return activation + normalized_perturbation
+    perturbed_activation = activation + normalized_perturbation
+    
+    # print("l2 perturbed l2 norm", (activation - perturbed_activation).norm(dim=-1)[-3:, -3:])
+    # print("l2 perturbed cos sim", cos_sim(activation, perturbed_activation)[-3:, -3:])
+    
+    if pos is None:
+        activation[:] = perturbed_activation
+    else:
+        activation[:, pos] = perturbed_activation[:, pos] 
+    
+    return activation
 
 
-def cos_preserving_perturbation_hook(activation, hook, sae_out, preserve_sae_norm=False):
+def cos_preserving_perturbation_hook(activation, hook, sae_out, preserve_sae_norm=False, pos=None):
     sae_out_norm = sae_out / sae_out.norm(dim=-1, keepdim=True)
     act_norm = activation / activation.norm(dim=-1, keepdim=True)
     
@@ -61,30 +97,65 @@ def cos_preserving_perturbation_hook(activation, hook, sae_out, preserve_sae_nor
     else:
         perturbed_act *= activation.norm(dim=-1, keepdim=True)
         
+    if pos is None:
+        activation[:] = perturbed_act
+    else:
+        activation[:, pos] = perturbed_act[:, pos] 
+        
     return perturbed_act
 
 
-def zero_ablation_hook(activation, hook):
-    return torch.zeros_like(activation)
+def zero_ablation_hook(activation, hook, pos=None):
+    zeros = torch.zeros_like(activation)
+    if pos is None:
+        activation[:] = zeros
+    else:
+        activation[:, pos] = zeros[:, pos]
+    return activation
 
 
-def mean_ablation_hook(activation, hook):
-    return activation.mean((0, 1), keepdim=True).expand_as(activation)
+def mean_ablation_hook(activation, hook, pos=None):
+    means = activation.mean((0, 1), keepdim=True).expand_as(activation)
+    if pos is None:
+        activation[:] = means
+    else:
+        activation[:, pos] = means[:, pos]
+    return activation
 
 
-def run_all_ablations(model, batch_tokens, sae_out, layer, hook_loc="resid_pre"):
-    hooks = [
-        ('substitution', partial(reconstruction_hook, sae_out=sae_out)),
-        ('norm_corrected_substitution', partial(reconstruction_w_norm_correction_hook, sae_out=sae_out)),
-        ('cos_corrected_substitution', partial(reconstruction_w_cos_correction_hook, sae_out=sae_out)),
-        ('l2_error_preserving_substitution', partial(l2_error_preserving_perturbation_hook, sae_out=sae_out)),
-        ('cos_preserving_substitution_w_sae_norm', partial(cos_preserving_perturbation_hook, sae_out=sae_out, preserve_sae_norm=True)),
-        ('cos_preserving_substitution_w_true_norm', partial(cos_preserving_perturbation_hook, sae_out=sae_out, preserve_sae_norm=False)),
-        ('zero_ablation', zero_ablation_hook),
-        ('mean_ablation', mean_ablation_hook)
+def create_ablation_hooks(sae_out, pos=None):
+    ablation_hooks = [
+        (
+            'substitution', 
+            partial(reconstruction_hook, sae_out=sae_out, pos=pos)),
+        (
+            'norm_corrected_substitution', 
+            partial(reconstruction_w_norm_correction_hook, sae_out=sae_out, pos=pos)),
+        (
+            'cos_corrected_substitution', 
+            partial(reconstruction_w_cos_correction_hook, sae_out=sae_out, pos=pos)),
+        (
+            'l2_error_preserving_substitution', 
+            partial(l2_error_preserving_perturbation_hook, sae_out=sae_out, pos=pos)),
+        (
+            'cos_preserving_substitution_w_sae_norm', 
+            partial(cos_preserving_perturbation_hook, sae_out=sae_out, pos=pos, preserve_sae_norm=True)),
+        (
+            'cos_preserving_substitution_w_true_norm', 
+            partial(cos_preserving_perturbation_hook, sae_out=sae_out, pos=pos, preserve_sae_norm=False)),
+        (
+            'zero_ablation',
+            partial(zero_ablation_hook, pos=pos)),
+        (
+            'mean_ablation', 
+            partial(mean_ablation_hook, pos=pos))
     ]
+    return ablation_hooks
+
+
+def run_all_ablations(model, batch_tokens, ablation_hooks, layer, hook_loc="resid_pre"):
     
-    orginal_logits = model.run_with_hooks(batch_tokens)
+    orginal_logits = model(batch_tokens)
     
     batch_size, seq_len = batch_tokens.shape
     batch_result_df = pd.DataFrame({
@@ -98,7 +169,7 @@ def run_all_ablations(model, batch_tokens, sae_out, layer, hook_loc="resid_pre")
     original_log_probs = orginal_logits.log_softmax(dim=-1)
     del orginal_logits
     
-    for hook_name, hook in hooks:
+    for hook_name, hook in ablation_hooks:
         
         intervention_logits = model.run_with_hooks(
             batch_tokens,
