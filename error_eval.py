@@ -1,15 +1,17 @@
 import argparse
 import os
 from functools import partial
-import tqdm
+
 import einops
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+import tqdm
 from huggingface_hub import hf_hub_download
-from transformer_lens import utils
+from transformer_lens import HookedTransformer, utils
 
+from attn_sae import *
 from sae_training.sae_group import SAEGroup
 from sae_training.utils import LMSparseAutoencoderSessionloader
 
@@ -129,7 +131,7 @@ def mean_ablation_hook(activation, hook, pos=None):
     return activation
 
 
-def create_ablation_hooks(sae_out, pos=None):
+def create_ablation_hooks(sae_out, pos=None, reshape_attn = False):
     ablation_hooks = [
         (
             'substitution', 
@@ -158,6 +160,16 @@ def create_ablation_hooks(sae_out, pos=None):
     ]
     return ablation_hooks
 
+
+def attn_hook_wrapper(activation, hook, hook_fn, n_heads=12, d_head=64):
+    activation = einops.rearrange(
+        activation,
+        "batch seq n_heads d_head -> batch seq (n_heads d_head)")
+    return einops.rearrange(
+        hook_fn(activation, hook),
+        "batch seq (n_heads d_head) -> batch seq n_heads d_head",
+            n_heads=n_heads, d_head=d_head)
+    
 
 def run_all_ablations(model, batch_tokens, ablation_hooks, layer, hook_loc="resid_pre"):
     
@@ -206,7 +218,7 @@ def load_sae(layer):
     FILENAME = f"final_sparse_autoencoder_gpt2-small_blocks.{layer}.hook_resid_pre_24576.pt"
     path = hf_hub_download(repo_id=REPO_ID, filename=FILENAME)
     
-    model, sparse_autoencoder, activation_store = (
+    model, sparse_autoencoder, _ = (
         LMSparseAutoencoderSessionloader.load_session_from_pretrained(path=path)
     )
     
@@ -215,10 +227,18 @@ def load_sae(layer):
     sae.load_state_dict(sparse_autoencoder['state_dict'])
     sae.eval() 
     
-    return sae, model, activation_store
+    return sae, model
 
 
-def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, pos=None):
+def load_attn_sae(layer):
+    auto_encoder_run = f"gpt2-small_L{layer}_Hcat_z_lr1.20e-03_l11.20e+00_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v9"
+    encoder = AutoEncoder.load_from_hf(auto_encoder_run, hf_repo="ckkissane/attn-saes-gpt2-small-all-layers")
+    model = HookedTransformer.from_pretrained(encoder.cfg["model_name"]).to(DTYPES[encoder.cfg["enc_dtype"]]).to(encoder.cfg["device"])
+    
+    return encoder, model
+
+
+def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, pos=None, hook_loc="resid_pre"):
     sae.eval()  # prevents error if we're expecting a dead neuron mask for who grads
 
     dataloader = torch.utils.data.DataLoader(
@@ -226,6 +246,8 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
         batch_size=batch_size,
         shuffle=False
     )
+    
+    activation_loc = utils.get_act_name(hook_loc, layer)
 
     result_dfs = []
     for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
@@ -233,13 +255,24 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
             _, cache = model.run_with_cache(
                 batch_tokens, 
                 prepend_bos=True,
-                names_filter=[sae.cfg.hook_point]
+                names_filter=[activation_loc]
             )
-            activations = cache[sae.cfg.hook_point]
+            activations = cache[activation_loc]
+            if hook_loc == "z":
+                activations = einops.rearrange(
+                    activations, "batch seq n_heads d_head -> batch seq (n_heads d_head)",
+                )
+                
             sae_out, feature_acts, _, _, _, _ = sae(activations)
             ablation_hooks = create_ablation_hooks(sae_out, pos=pos)
             
-            batch_result_df = run_all_ablations(model, batch_tokens, ablation_hooks, layer=layer)
+            if hook_loc == "z":
+                ablation_hooks = [
+                    (name, partial(attn_hook_wrapper, hook_fn=hook_fn))
+                    for name, hook_fn in ablation_hooks
+                ]
+            
+            batch_result_df = run_all_ablations(model, batch_tokens, ablation_hooks, layer=layer, hook_loc=hook_loc)
             
             l0 = (feature_acts > 0).float().sum(dim=-1).cpu().numpy()[:, :-1].flatten()
             l1 = feature_acts.abs().sum(dim=-1).cpu().numpy()[:, :-1].flatten()
@@ -260,6 +293,7 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # layer, batchsize, num_batches, output_dir, pos 
+    parser.add_argument("--hook_loc", type=str, default="resid_pre")
     parser.add_argument("--layer", type=int, required=True)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--output_dir", type=str, default="error_eval_results")
@@ -268,7 +302,12 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
-    sae, model, activation_store = load_sae(args.layer)
+    if args.hook_loc == "resid_pre":
+        sae, model = load_sae(args.layer)
+    elif args.hook_loc == "z":
+        sae, model = load_attn_sae(args.layer)
+    else:
+        raise ValueError(f"Unsupported hook location {args.hook_loc}")
     
     sae = sae.to(args.device)
     model = model.to(args.device)
@@ -276,9 +315,16 @@ if __name__ == '__main__':
     token_tensor = torch.load("token_tensor.pt").to(args.device)
     
     result_df = run_error_eval_experiment(
-        sae, model, token_tensor, args.layer, args.batch_size, args.pos)
+        sae, 
+        model, 
+        token_tensor, 
+        args.layer, 
+        args.batch_size, 
+        args.pos, 
+        args.hook_loc
+    )
     
-    save_path = os.path.join(args.output_dir, "gpt2_resid")
+    save_path = os.path.join(args.output_dir, f"gpt2_{args.hook_loc}")
     os.makedirs(save_path, exist_ok=True)
     pos_label = 'all' if args.pos is None else args.pos
     save_name = f"layer_{args.layer}_pos_{pos_label}.csv"
