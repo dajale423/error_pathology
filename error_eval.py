@@ -313,6 +313,7 @@ if __name__ == '__main__':
     parser.add_argument("--output_dir", type=str, default="error_eval_results")
     parser.add_argument("--pos", type=int, default=None)
     parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--repeat", type=int, default=1)
     
     args = parser.parse_args()
     
@@ -327,6 +328,14 @@ if __name__ == '__main__':
     model = model.to(args.device)
     
     token_tensor = torch.load("token_tensor.pt").to(args.device)
+    
+    if args.repeat > 1:
+        token_tensor = token_tensor[: args.batch_size]
+        token_tensor = einops.repeat(
+            token_tensor, 
+            "batch seq -> (repeat batch) seq", 
+            repeat=args.repeat
+        )
     
     result_df = run_error_eval_experiment(
         sae, 
