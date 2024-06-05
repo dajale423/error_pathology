@@ -217,14 +217,26 @@ def load_sae(layer):
     REPO_ID = "jbloom/GPT2-Small-SAEs"
     FILENAME = f"final_sparse_autoencoder_gpt2-small_blocks.{layer}.hook_resid_pre_24576.pt"
     path = hf_hub_download(repo_id=REPO_ID, filename=FILENAME)
+
+    print("A")
     
     model, sparse_autoencoder, _ = (
         LMSparseAutoencoderSessionloader.load_session_from_pretrained(path=path)
     )
+
+    print("B")
     
     sae_group = SAEGroup(sparse_autoencoder['cfg'])
+
+    print("C")
     sae = sae_group.autoencoders[0]
+
+    print("D")
+    
     sae.load_state_dict(sparse_autoencoder['state_dict'])
+
+    print("E")
+    
     sae.eval() 
     
     return sae, model
@@ -316,6 +328,8 @@ if __name__ == '__main__':
     parser.add_argument("--repeat", type=int, default=1)
     
     args = parser.parse_args()
+
+    print("loading sae and model")
     
     if args.hook_loc == "resid_pre":
         sae, model = load_sae(args.layer)
@@ -323,11 +337,15 @@ if __name__ == '__main__':
         sae, model = load_attn_sae(args.layer)
     else:
         raise ValueError(f"Unsupported hook location {args.hook_loc}")
-    
+
     sae = sae.to(args.device)
     model = model.to(args.device)
+
+    print("loading token tensors")
     
     token_tensor = torch.load("token_tensor.pt").to(args.device)
+
+    print("finished loading token tensors")
     
     if args.repeat > 1:
         token_tensor = token_tensor[: args.batch_size]

@@ -69,13 +69,19 @@ class SAEGroup:
             try:
                 if torch.backends.mps.is_available():
                     map_loc = "mps"
-                    group = torch.load(path, map_location=map_loc)
-                    if isinstance(group, dict):
-                        group["cfg"].device = map_loc
-                    else:
-                        group.cfg.device = map_loc
+                elif torch.cuda.is_available() == False:
+                    map_loc = "cpu"
                 else:
-                    group = torch.load(path)
+                    map_loc = None
+
+                print("map_loc is", map_loc)
+                    
+                group = torch.load(path, map_location=map_loc)
+                if isinstance(group, dict):
+                    group["cfg"].device = map_loc
+                else:
+                    group.cfg.device = map_loc
+
             except Exception as e:
                 raise IOError(f"Error loading the state dictionary from .pt file: {e}")
 
