@@ -68,8 +68,12 @@ class SAEGroup:
         if path.endswith(".pt"):
             try:
                 if torch.backends.mps.is_available():
-                    group = torch.load(path, map_location="mps")
-                    group.cfg.device = "mps"
+                    map_loc = "mps"
+                    group = torch.load(path, map_location=map_loc)
+                    if isinstance(group, dict):
+                        group["cfg"].device = map_loc
+                    else:
+                        group.cfg.device = map_loc
                 else:
                     group = torch.load(path)
             except Exception as e:
