@@ -48,15 +48,10 @@ class LMSparseAutoencoderSessionloader:
         #     cfg = torch.load(path, map_location="cpu")["cfg"]
 
 
-        print("loading from pretrained")
         sparse_autoencoders = SAEGroup.load_from_pretrained(path)
-
-        print("finished loading from pretrained")
 
         print(sparse_autoencoders["cfg"])
         model, _, activations_loader = cls(sparse_autoencoders["cfg"]).load_session()
-
-        print("finished loading session")
 
         return model, sparse_autoencoders, activations_loader
 

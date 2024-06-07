@@ -69,12 +69,11 @@ class SAEGroup:
             try:
                 if torch.backends.mps.is_available():
                     map_loc = "mps"
-                elif torch.cuda.is_available() == False:
-                    map_loc = "cpu"
+                elif torch.cuda.is_available():
+                    print("cuda is available")
+                    map_loc = "cuda"
                 else:
-                    map_loc = None
-
-                print("map_loc is", map_loc)
+                    map_loc = "cpu"
                     
                 group = torch.load(path, map_location=map_loc)
                 if isinstance(group, dict):
