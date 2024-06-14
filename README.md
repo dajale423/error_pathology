@@ -1,9 +1,6 @@
-# MATS SAE Training
+# SAE Pathology
 
-[![build](https://github.com/jbloomAus/mats_sae_training/actions/workflows/tests.yml/badge.svg)](https://github.com/jbloomAus/mats_sae_training/actions/workflows/tests.yml)
-
-This codebase contains training scripts and analysis code for Sparse AutoEncoders. I wasn't planning to share this codebase initially but I've recieved feedback that others have found it useful so I'm going to slowly transition it to be a more serious repo (formating/linting/testing etc.). In the mean time, please feel free to add Pull Requests or make issues if you have any trouble with it. 
-
+This codebase is used to explore the errors of SAEs to better understand what it may be missing out on.
 
 ## Set Up
 
@@ -12,10 +9,6 @@ This project uses [Poetry](https://python-poetry.org/) for dependency management
 ```
 poetry install
 ```
-
-## Background
-
-We highly recommend this [tutorial](https://www.lesswrong.com/posts/LnHowHgmrMbWtpkxx/intro-to-superposition-and-sparse-autoencoders-colab).
 
 ## Code Overview
 
