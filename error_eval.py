@@ -15,6 +15,8 @@ from attn_sae import *
 from sae_training.sae_group import SAEGroup
 from sae_training.utils import LMSparseAutoencoderSessionloader
 
+from e2e_sae import SAETransformer
+
 
 def cos_sim(a, b):
     return einops.einsum(
@@ -323,17 +325,28 @@ if __name__ == '__main__':
     parser.add_argument("--pos", type=int, default=None)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--e2e", type=str, default=None)
     
     args = parser.parse_args()
 
     print("loading sae and model")
-    
-    if args.hook_loc == "resid_pre":
-        sae, model = load_sae(args.layer)
-    elif args.hook_loc == "z":
-        sae, model = load_attn_sae(args.layer)
+
+    if args.e2e is None:
+        e2e_tag = False
+        if args.hook_loc == "resid_pre":
+            sae, model = load_sae(args.layer)
+        elif args.hook_loc == "z":
+            sae, model = load_attn_sae(args.layer)
+        else:
+            raise ValueError(f"Unsupported hook location {args.hook_loc}")
     else:
-        raise ValueError(f"Unsupported hook location {args.hook_loc}")
+        e2e_tag = True
+        model_id = args.e2e
+        text = "sparsify/gpt2/" + model_id
+        sae_transformer_model = SAETransformer.from_wandb(text)
+
+        model = sae_transformer_model.tlens_model
+        sae = sae_transformer_model.saes[f"blocks-{args.layer}-hook_{args.hook_loc}"]
 
     sae = sae.to(args.device)
     model = model.to(args.device)
@@ -359,12 +372,17 @@ if __name__ == '__main__':
         args.layer, 
         args.batch_size, 
         args.pos, 
-        args.hook_loc
+        args.hook_loc,
+        args.e2e
     )
     
     save_path = os.path.join(args.output_dir, f"gpt2_{args.hook_loc}")
     os.makedirs(save_path, exist_ok=True)
     pos_label = 'all' if args.pos is None else args.pos
+    
     save_name = f"layer_{args.layer}_pos_{pos_label}.csv"
+
+    if args.e2e is not None:
+        save_name = f"e2e_{args.e2e}_" + save_name
     
     result_df.to_csv(os.path.join(save_path, save_name), index=False)
