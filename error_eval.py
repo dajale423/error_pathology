@@ -217,25 +217,16 @@ def load_sae(layer):
     REPO_ID = "jbloom/GPT2-Small-SAEs"
     FILENAME = f"final_sparse_autoencoder_gpt2-small_blocks.{layer}.hook_resid_pre_24576.pt"
     path = hf_hub_download(repo_id=REPO_ID, filename=FILENAME)
-
-    print("A")
     
     model, sparse_autoencoder, _ = (
         LMSparseAutoencoderSessionloader.load_session_from_pretrained(path=path)
     )
-
-    print("B")
     
     sae_group = SAEGroup(sparse_autoencoder['cfg'])
 
-    print("C")
     sae = sae_group.autoencoders[0]
-
-    print("D")
     
     sae.load_state_dict(sparse_autoencoder['state_dict'])
-
-    print("E")
     
     sae.eval() 
     
@@ -264,7 +255,7 @@ def load_attn_sae(layer):
     return encoder, model
 
 
-def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, pos=None, hook_loc="resid_pre"):
+def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, pos=None, hook_loc="resid_pre", e2e = False):
     sae.eval()  # prevents error if we're expecting a dead neuron mask for who grads
 
     dataloader = torch.utils.data.DataLoader(
@@ -288,8 +279,14 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
                 activations = einops.rearrange(
                     activations, "batch seq n_heads d_head -> batch seq (n_heads d_head)",
                 )
-                
-            sae_out, feature_acts, _, _, _, _ = sae(activations)
+
+            
+            # for E2E SAEs
+            if e2e:
+                sae_out, feature_acts = sae(activations)
+            else:
+                sae_out, feature_acts, _, _, _, _ = sae(activations)
+            
             ablation_hooks = create_ablation_hooks(sae_out, pos=pos)
             
             if hook_loc == "z":
