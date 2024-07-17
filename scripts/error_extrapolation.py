@@ -219,7 +219,7 @@ if __name__ == '__main__':
 
     print("loading token tensors")
     
-    token_tensor = torch.load("token_tensor.pt").to(args.device)
+    token_tensor = torch.load("../token_tensor.pt").to(args.device)
 
     print("finished loading token tensors")
     
@@ -242,7 +242,7 @@ if __name__ == '__main__':
         args.e2e
     )
     
-    save_path = os.path.join("results/" + args.output_dir, f"gpt2_{args.hook_loc}")
+    save_path = os.path.join("../results/" + args.output_dir, f"gpt2_{args.hook_loc}")
     os.makedirs(save_path, exist_ok=True)
     pos_label = 'all' if args.pos is None else args.pos
     
