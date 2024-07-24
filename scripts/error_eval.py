@@ -63,7 +63,32 @@ def reconstruction_w_cos_correction_hook(activation, hook, sae_out, pos=None):
     return activation
     
 
-def l2_error_preserving_perturbation_hook(activation, hook, sae_out, pos=None):
+def l2_error_preserving_perturbation_hook_covariance(activation, hook, sae_out, mean, cov, pos=None):
+    error = (sae_out - activation).norm(dim=-1)
+
+    #change device to cpu since mps is not supported
+    multiNormal = torch.distributions.multivariate_normal.MultivariateNormal(mean.to("cpu"), covariance.to("cpu"))
+    perturbation = multiNormal.sample()
+    
+    perturbation = torch.randn_like(activation)
+    normalized_perturbation = (
+        perturbation / perturbation.norm(dim=-1, keepdim=True)
+        ) * error.unsqueeze(-1)
+    
+    perturbed_activation = activation + normalized_perturbation
+    
+    # print("l2 perturbed l2 norm", (activation - perturbed_activation).norm(dim=-1)[-3:, -3:])
+    # print("l2 perturbed cos sim", cos_sim(activation, perturbed_activation)[-3:, -3:])
+    
+    if pos is None:
+        activation[:] = perturbed_activation
+    else:
+        activation[:, pos] = perturbed_activation[:, pos] 
+    
+    return activation
+
+#use mean and covariance from activation
+def l2_error_preserving_perturbation(activation, hook, sae_out, pos=None):
     error = (sae_out - activation).norm(dim=-1)
     perturbation = torch.randn_like(activation)
     normalized_perturbation = (
@@ -257,7 +282,7 @@ def load_attn_sae(layer):
     return encoder, model
 
 
-def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, pos=None, hook_loc="resid_pre", e2e = False):
+def run_error_extrapolation_experiment(sae, model, token_tensor, layer, batch_size=64, pos=None, hook_loc="resid_pre", e2e = False):
     sae.eval()  # prevents error if we're expecting a dead neuron mask for who grads
 
     dataloader = torch.utils.data.DataLoader(
@@ -282,7 +307,6 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
                     activations, "batch seq n_heads d_head -> batch seq (n_heads d_head)",
                 )
 
-            
             # for E2E SAEs
             if e2e:
                 sae_out, feature_acts = sae(activations)
@@ -313,7 +337,6 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
             result_dfs.append(batch_result_df)
             
     return pd.concat(result_dfs).reset_index(drop=True)
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -365,7 +388,7 @@ if __name__ == '__main__':
             repeat=args.repeat
         )
     
-    result_df = run_error_eval_experiment(
+    result_df = run_error_extrapolation_experiment(
         sae, 
         model, 
         token_tensor, 
@@ -376,7 +399,7 @@ if __name__ == '__main__':
         args.e2e
     )
     
-    save_path = os.path.join(args.output_dir, f"gpt2_{args.hook_loc}")
+    save_path = os.path.join("results/" + args.output_dir, f"gpt2_{args.hook_loc}")
     os.makedirs(save_path, exist_ok=True)
     pos_label = 'all' if args.pos is None else args.pos
     
