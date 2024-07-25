@@ -204,11 +204,11 @@ if __name__ == '__main__':
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--e2e", type=str, default=None)
-    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=23)
     
     args = parser.parse_args()
     # set seed
-    np.random.seed(seed)
+    np.random.seed(args.seed)
     
     print("loading sae and model")
 
@@ -235,6 +235,7 @@ if __name__ == '__main__':
     print("loading token tensors")
     
     token_tensor = torch.load("../token_tensor.pt").to(args.device)
+    token_tensor = token_tensor[:1000,:]
 
     print("finished loading token tensors")
     
