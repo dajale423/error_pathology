@@ -18,26 +18,27 @@ from sae_training.utils import LMSparseAutoencoderSessionloader
 from e2e_sae import SAETransformer
 import random
 
+from error_eval import cos_sim, load_sae, load_attn_sae
 
-from error_eval import cos_sim
-
-def feature_extrapolation(activation, hook, feature_acts, alive_features, sae_dict, length, 
+def feature_extrapolation(activation, hook, feature_acts, alive_features, sae_dict, random_uniform, length, 
                           feature_type = "alive", pos=None):
     # randomly sample an index
     if feature_type == "alive":
+        # take out features that are active for that batch
         nonactive_alive_features = alive_features - (feature_acts > 1e-8).to(int).sum(dim = (0, 1)).to(bool).to(int)
-        active_features_all = (nonactive_alive_features == 1).nonzero()
+        features_all = (nonactive_alive_features == 1).nonzero()
     elif feature_type == "active":
         active_features = (feature_acts > 1e-8).to(int).sum(dim = (0, 1)).to(bool).to(int)
-        active_features_all = (active_features == 1).nonzero()
+        features_all = (active_features == 1).nonzero()
     elif feature_type == "dead":
         dead_features = 1 - alive_features
-        active_features_all = (dead_features == 1).nonzero()
+        features_all = (dead_features == 1).nonzero()
 
-    index = active_features_all[random.randrange(active_features_all.shape[0]),:].item()
+    index = (features_all.shape[0] * random_uniform).astype(int)
 
     #already a unit vector
-    feature_vector = sae_dict[:,index]
+    feature_vector = einops.rearrange(sae_dict[:, index], 
+                                      "n_dim batch_size seq -> batch_size seq n_dim")     
     perturbed_activation = activation + feature_vector * length
 
     if pos is None:
@@ -47,13 +48,17 @@ def feature_extrapolation(activation, hook, feature_acts, alive_features, sae_di
         
     return activation
 
+## we should have the same index for different lengths
 def create_ablation_hooks(feature_acts, alive_features, sae_dict, pos=None):
     ablation_hooks = []
+    random_uniform = np.random.uniform(low = 0.0, high = 1.0, size = (feature_acts.shape[0], feature_acts.shape[1]))
     for feature_type in ["alive", "active", "dead"]:
+
+        # generate random uniform of length batch_size
         for length in range(1, 211, 10):
             ablation_hooks.append((f'{feature_type}_feature_length_{length}', 
                                    partial(feature_extrapolation, feature_acts=feature_acts,
-                                           alive_features=alive_features, sae_dict=sae_dict,
+                                           alive_features=alive_features, sae_dict=sae_dict, random_uniform=random_uniform,
                                            length = length, feature_type = feature_type, pos=pos)))
     return ablation_hooks
 
@@ -98,83 +103,32 @@ def run_all_ablations(model, batch_tokens, ablation_hooks, layer, hook_loc="resi
     
     return batch_result_df
 
-
-def load_sae(layer):
-    REPO_ID = "jbloom/GPT2-Small-SAEs"
-    FILENAME = f"final_sparse_autoencoder_gpt2-small_blocks.{layer}.hook_resid_pre_24576.pt"
-    path = hf_hub_download(repo_id=REPO_ID, filename=FILENAME)
-    
-    model, sparse_autoencoder, _ = (
-        LMSparseAutoencoderSessionloader.load_session_from_pretrained(path=path)
-    )
-    
-    sae_group = SAEGroup(sparse_autoencoder['cfg'])
-
-    sae = sae_group.autoencoders[0]
-    
-    sae.load_state_dict(sparse_autoencoder['state_dict'])
-    
-    sae.eval() 
-    
-    return sae, model
-
-
-def load_attn_sae(layer):
-    auto_encoder_names = {
-        0 : "gpt2-small_L0_Hcat_z_lr1.20e-03_l11.80e+00_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v9",
-        1 : "gpt2-small_L1_Hcat_z_lr1.20e-03_l18.00e-01_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v5",
-        2 : "gpt2-small_L2_Hcat_z_lr1.20e-03_l11.00e+00_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v4",
-        3 : "gpt2-small_L3_Hcat_z_lr1.20e-03_l19.00e-01_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v9",
-        4 : "gpt2-small_L4_Hcat_z_lr1.20e-03_l11.10e+00_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v7",
-        5 : "gpt2-small_L5_Hcat_z_lr1.20e-03_l11.00e+00_ds49152_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v9",
-        6 : "gpt2-small_L6_Hcat_z_lr1.20e-03_l11.10e+00_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v9",
-        7 : "gpt2-small_L7_Hcat_z_lr1.20e-03_l11.10e+00_ds49152_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v9",
-        8 : "gpt2-small_L8_Hcat_z_lr1.20e-03_l11.30e+00_ds24576_bs4096_dc1.00e-05_rsanthropic_rie25000_nr4_v6",
-        9 : "gpt2-small_L9_Hcat_z_lr1.20e-03_l11.20e+00_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v9",
-        10 : "gpt2-small_L10_Hcat_z_lr1.20e-03_l11.30e+00_ds24576_bs4096_dc1.00e-05_rsanthropic_rie25000_nr4_v9",
-        11 : "gpt2-small_L11_Hcat_z_lr1.20e-03_l13.00e+00_ds24576_bs4096_dc3.16e-06_rsanthropic_rie25000_nr4_v9"
-    }
-    auto_encoder_run = auto_encoder_names[layer]
-    encoder = AutoEncoder.load_from_hf(auto_encoder_run, hf_repo="ckkissane/attn-saes-gpt2-small-all-layers")
-    model = HookedTransformer.from_pretrained(encoder.cfg["model_name"]).to(DTYPES[encoder.cfg["enc_dtype"]]).to(encoder.cfg["device"])
-    
-    return encoder, model
-
-def get_alive_features(token_tensor, sae, model, hook_loc, layer, e2e, batch_size):
+def get_alive_features(dataloader, sae, model, activation_loc, e2e):
     ## we want to save a tensor of active activations
     ## value of 1 for alive features, 0 for dead feature
-    dataloader = torch.utils.data.DataLoader(
-        token_tensor,
-        batch_size=batch_size,
-        shuffle=False
-    )
-    activation_loc = utils.get_act_name(hook_loc, layer)
-    
-    first = True    
+    first = True
     for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
-        with torch.inference_mode():
-    
-            _, cache = model.run_with_cache(
-                    batch_tokens,
-                    prepend_bos=True,
-                    names_filter=[activation_loc]
-                )
-            activations = cache[activation_loc]
-    
-            # for E2E SAEs
-            if e2e:
-                sae_out, feature_acts = sae(activations)
-            else:
-                sae_out, feature_acts, _, _, _, _ = sae(activations)
-    
-            # get active features, do cutoff of 1e-8
-            active_features = (feature_acts > 1e-8).to(int).sum(dim = (0, 1))
-    
-            if first:
-                first = False
-                active_features_batch = active_features.unsqueeze(dim = 0)
-            else:
-                active_features_batch = torch.cat((active_features_batch, active_features.unsqueeze(dim = 0)))
+        _, cache = model.run_with_cache(
+                batch_tokens,
+                prepend_bos=True,
+                names_filter=[activation_loc]
+            )
+        activations = cache[activation_loc]
+
+        # for E2E SAEs
+        if e2e:
+            sae_out, feature_acts = sae(activations)
+        else:
+            sae_out, feature_acts, _, _, _, _ = sae(activations)
+
+        # get active features, do cutoff of 1e-8
+        active_features = (feature_acts > 1e-8).to(int).sum(dim = (0, 1))
+
+        if first:
+            first = False
+            active_features_batch = active_features.unsqueeze(dim = 0)
+        else:
+            active_features_batch = torch.cat((active_features_batch, active_features.unsqueeze(dim = 0)))
 
     active_features_all = active_features_batch.sum(dim = 0).to(bool).to(int)
     return active_features_all
@@ -189,13 +143,13 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
         shuffle=False
     )
 
-    alive_features = get_alive_features(token_tensor, sae, model, hook_loc, layer, e2e, batch_size)
-    
     activation_loc = utils.get_act_name(hook_loc, layer)
 
+    alive_features = get_alive_features(dataloader, sae, model, activation_loc, e2e)
+
     result_dfs = []
-    for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
-        with torch.inference_mode():
+    with torch.inference_mode():
+        for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
             _, cache = model.run_with_cache(
                 batch_tokens, 
                 prepend_bos=True,
@@ -207,7 +161,6 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
                     activations, "batch seq n_heads d_head -> batch seq (n_heads d_head)",
                 )
 
-            
             # for E2E SAEs
             if e2e:
                 sae_out, feature_acts = sae(activations)
@@ -240,7 +193,6 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
             
     return pd.concat(result_dfs).reset_index(drop=True)
 
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # layer, batchsize, num_batches, output_dir, pos 
@@ -256,8 +208,8 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     # set seed
-    random.seed(args.seed)
-
+    np.random.seed(seed)
+    
     print("loading sae and model")
 
     if args.e2e is None:
