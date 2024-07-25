@@ -140,11 +140,11 @@ def load_attn_sae(layer):
     
     return encoder, model
 
-def get_alive_features(token_tensor, sae, model, hook_loc, layer):
+def get_alive_features(token_tensor, sae, model, hook_loc, layer, e2e, batch_size):
     ## we want to save a tensor of active activations
     ## value of 1 for alive features, 0 for dead feature
     dataloader = torch.utils.data.DataLoader(
-        token_tensor_small,
+        token_tensor,
         batch_size=batch_size,
         shuffle=False
     )
@@ -189,7 +189,7 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
         shuffle=False
     )
 
-    alive_features = get_alive_features(token_tensor, sae, model, hook_loc, layer)
+    alive_features = get_alive_features(token_tensor, sae, model, hook_loc, layer, e2e, batch_size)
     
     activation_loc = utils.get_act_name(hook_loc, layer)
 
