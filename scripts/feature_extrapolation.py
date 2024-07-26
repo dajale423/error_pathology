@@ -40,7 +40,7 @@ def feature_extrapolation(activation, hook, feature_acts, alive_features, sae_di
     index = (features_all.shape[0] * random_uniform).astype(int)
 
     #already a unit vector
-    feature_vector = einops.rearrange(sae_dict[:, features_all[index].squeeze()], 
+    feature_vector = einops.rearrange(sae_dict[:, features_all[index].squeeze(dim = -1)], 
                                       "n_dim batch_size seq -> batch_size seq n_dim") 
     perturbed_activation = activation + feature_vector * length
 
@@ -152,6 +152,8 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
     alive_features = get_alive_features(dataloader, sae, model, activation_loc, e2e)
 
     result_dfs = []
+    sae_dict = sae.dict_elements
+    
     with torch.inference_mode():
         for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
             _, cache = model.run_with_cache(
@@ -171,7 +173,6 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
             else:
                 sae_out, feature_acts, _, _, _, _ = sae(activations)
 
-            sae_dict = sae.dict_elements
             ablation_hooks = create_ablation_hooks(feature_acts, alive_features, sae_dict, pos=pos)
             
             if hook_loc == "z":
