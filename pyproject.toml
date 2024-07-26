@@ -23,6 +23,7 @@ babe = "^0.0.7"
 nltk = "^3.8.1"
 seaborn = "^0.13.2"
 e2e-sae = {git = "https://github.com/dajale423/e2e_sae.git"}
+snakemake = "^8.16.0"
 
 
 [tool.poetry.group.dev.dependencies]
