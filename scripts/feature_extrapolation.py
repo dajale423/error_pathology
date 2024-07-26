@@ -150,6 +150,9 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
     activation_loc = utils.get_act_name(hook_loc, layer)
 
     alive_features = get_alive_features(dataloader, sae, model, activation_loc, e2e)
+    alive_dict_num = alive_features.sum()
+
+    print(f"number of active dict elements are {alive_dict_num}")
 
     result_dfs = []
     sae_dict = sae.dict_elements
@@ -193,6 +196,7 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
             batch_result_df['norm'] = activations.norm(dim=-1).cpu().numpy()[:, :-1].flatten()
             batch_result_df['sae_norm'] = sae_out.norm(dim=-1).cpu().numpy()[:, :-1].flatten()
             batch_result_df['cos'] = cos_sim(activations, sae_out).cpu().numpy()[:, :-1].flatten()
+            batch_result_df['alive_dict_elements'] = alive_dict_num
             
             result_dfs.append(batch_result_df)
             
