@@ -5,6 +5,9 @@ from functools import partial
 import einops
 import numpy as np
 import pandas as pd
+from warnings import simplefilter
+#ignore some warning error from pandas
+simplefilter(action="ignore", category=pd.errors.PerformanceWarning)
 import torch
 import torch.nn.functional as F
 import tqdm
@@ -37,8 +40,8 @@ def feature_extrapolation(activation, hook, feature_acts, alive_features, sae_di
     index = (features_all.shape[0] * random_uniform).astype(int)
 
     #already a unit vector
-    feature_vector = einops.rearrange(sae_dict[:, index], 
-                                      "n_dim batch_size seq -> batch_size seq n_dim")     
+    feature_vector = einops.rearrange(sae_dict[:, features_all[index].squeeze()], 
+                                      "n_dim batch_size seq -> batch_size seq n_dim") 
     perturbed_activation = activation + feature_vector * length
 
     if pos is None:
@@ -107,30 +110,31 @@ def get_alive_features(dataloader, sae, model, activation_loc, e2e):
     ## we want to save a tensor of active activations
     ## value of 1 for alive features, 0 for dead feature
     first = True
-    for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
-        _, cache = model.run_with_cache(
-                batch_tokens,
-                prepend_bos=True,
-                names_filter=[activation_loc]
-            )
-        activations = cache[activation_loc]
-
-        # for E2E SAEs
-        if e2e:
-            sae_out, feature_acts = sae(activations)
-        else:
-            sae_out, feature_acts, _, _, _, _ = sae(activations)
-
-        # get active features, do cutoff of 1e-8
-        active_features = (feature_acts > 1e-8).to(int).sum(dim = (0, 1))
-
-        if first:
-            first = False
-            active_features_batch = active_features.unsqueeze(dim = 0)
-        else:
-            active_features_batch = torch.cat((active_features_batch, active_features.unsqueeze(dim = 0)))
-
-    active_features_all = active_features_batch.sum(dim = 0).to(bool).to(int)
+    with torch.inference_mode():
+        for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
+            _, cache = model.run_with_cache(
+                    batch_tokens,
+                    prepend_bos=True,
+                    names_filter=[activation_loc]
+                )
+            activations = cache[activation_loc]
+    
+            # for E2E SAEs
+            if e2e:
+                sae_out, feature_acts = sae(activations)
+            else:
+                sae_out, feature_acts, _, _, _, _ = sae(activations)
+    
+            # get active features, do cutoff of 1e-8
+            active_features = (feature_acts > 1e-8).to(int).sum(dim = (0, 1))
+    
+            if first:
+                first = False
+                active_features_batch = active_features.unsqueeze(dim = 0)
+            else:
+                active_features_batch = torch.cat((active_features_batch, active_features.unsqueeze(dim = 0)))
+    
+        active_features_all = active_features_batch.sum(dim = 0).to(bool).to(int)
     return active_features_all
 
 
@@ -223,6 +227,7 @@ if __name__ == '__main__':
     else:
         e2e_tag = True
         model_id = args.e2e
+        print(f"running model: {model_id}")
         text = "sparsify/gpt2/" + model_id
         sae_transformer_model = SAETransformer.from_wandb(text)
 
@@ -231,13 +236,9 @@ if __name__ == '__main__':
 
     sae = sae.to(args.device)
     model = model.to(args.device)
-
-    print("loading token tensors")
     
     token_tensor = torch.load("../token_tensor.pt").to(args.device)
-    token_tensor = token_tensor[:1000,:]
-
-    print("finished loading token tensors")
+    # token_tensor = token_tensor[:1000,:]
     
     if args.repeat > 1:
         token_tensor = token_tensor[: args.batch_size]
@@ -262,7 +263,7 @@ if __name__ == '__main__':
     os.makedirs(save_path, exist_ok=True)
     pos_label = 'all' if args.pos is None else args.pos
 
-    save_name = f"layer_{args.layer}_seed_{seed}_pos_{pos_label}.csv"
+    save_name = f"layer_{args.layer}_seed_{args.seed}_batchsize_{args.batch_size}_pos_{pos_label}.csv"
     
     if args.e2e is not None:
         save_name = f"e2e_{args.e2e}_" + save_name
