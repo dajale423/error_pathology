@@ -196,7 +196,7 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
             batch_result_df['norm'] = activations.norm(dim=-1).cpu().numpy()[:, :-1].flatten()
             batch_result_df['sae_norm'] = sae_out.norm(dim=-1).cpu().numpy()[:, :-1].flatten()
             batch_result_df['cos'] = cos_sim(activations, sae_out).cpu().numpy()[:, :-1].flatten()
-            batch_result_df['alive_dict_elements'] = alive_dict_num
+            batch_result_df['alive_dict_elements'] = alive_dict_num.item()
             
             result_dfs.append(batch_result_df)
             
