@@ -16,7 +16,6 @@ from sae_training.sae_group import SAEGroup
 from sae_training.utils import LMSparseAutoencoderSessionloader
 
 from e2e_sae import SAETransformer
-
 from error_eval import cos_sim, load_sae, load_attn_sae
 import random 
 
@@ -70,7 +69,9 @@ def real_direction(activation, hook, token_tensor, length, pos=None):
 
 def create_ablation_hooks(direction_type, device, pos= None, multiNormal = None, token_tensor = None):
     ablation_hooks = []
-    length_list = list(range(1, 211, 10))
+    
+#    length_list = list(range(1, 211, 10))
+    length_list = list(range(1, 20, 2)) + list(range(20, 50, 4)) + list(range(51, 211, 10))
     if direction_type == "naive_random":
         for length in length_list:
             ablation_hooks.append((f'length_{length}', 
@@ -129,7 +130,41 @@ def run_all_ablations(model, batch_tokens, ablation_hooks, layer, hook_loc="resi
     
     return batch_result_df
 
-def run_error_eval_experiment(sae, model, token_tensor, layer, direction_type, device, seed,  batch_size=64, pos=None, hook_loc="resid_pre", e2e = None):
+def get_all_activations(dataloader, sae, model, activation_loc, e2e, remove_first_token = True):
+    ## we want to save a tensor of active activations
+    ## value of 1 for alive features, 0 for dead feature
+    first = True
+    with torch.inference_mode():
+        for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
+            _, cache = model.run_with_cache(
+                    batch_tokens,
+                    prepend_bos=True,
+                    names_filter=[activation_loc]
+                )
+            activations = cache[activation_loc]
+    
+            # for E2E SAEs
+            if e2e:
+                sae_out, feature_acts = sae(activations)
+            else:
+                sae_out, feature_acts, _, _, _, _ = sae(activations)
+
+            if first:
+                all_activations = activations
+                first = False
+            else:
+                all_activations = torch.cat((all_activations, activations))
+
+        if remove_first_token: # for skipping first token
+            all_activations = all_activations[:, 1:, :]
+    
+        all_activations = einops.rearrange(all_activations, "batch seq n_hidden -> (batch seq) n_hidden")
+    
+        return all_activations
+
+
+def run_error_eval_experiment(sae, model, token_tensor, layer, direction_type, device,  batch_size=64, pos=None, 
+                              hook_loc="resid_pre", e2e = None, remove_first_token = True):
     sae.eval()  # prevents error if we're expecting a dead neuron mask for who grads
 
     dataloader = torch.utils.data.DataLoader(
@@ -140,32 +175,16 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, direction_type, d
     
     activation_loc = utils.get_act_name(hook_loc, layer)
 
-    # generate normal distribution with mean and covariance from the known activations
     if direction_type != "naive_random":
-        # get all activations
-        first = True
-        for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
-            with torch.inference_mode():
-                _, cache = model.run_with_cache(
-                    batch_tokens, 
-                    prepend_bos=True,
-                    names_filter=[activation_loc]
-                )
-                activations = cache[activation_loc]
-        
-                if first:
-                    all_activations = activations
-                    first = False
-                else:
-                    all_activations = torch.cat((all_activations, activations))
-        
-        all_activations = einops.rearrange(all_activations, "batch seq n_hidden -> (batch seq) n_hidden")
-        covariance = torch.cov(all_activations.T)
-        mean = torch.mean(all_activations.T, dim = 1)
+        all_activations = get_all_activations(dataloader, sae, model, activation_loc, e2e, remove_first_token)
+        print(all_activations.shape)
 
         if direction_type == "cov_random":
-            multiNormal = torch.distributions.multivariate_normal.MultivariateNormal(mean.to("cpu"),
-                                                                                     covariance.to("cpu"))
+            covariance = torch.cov(all_activations.T)
+            torch.save(covariance, 'covariance.pt')
+            mean = torch.mean(all_activations.T, dim = 1)
+            multiNormal = torch.distributions.multivariate_normal.MultivariateNormal(mean.to("cpu"), covariance.to("cpu"))
+            del all_activations
     
     result_dfs = []
     for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
@@ -229,17 +248,18 @@ if __name__ == '__main__':
     parser.add_argument("--e2e", type=str, default=None)
     parser.add_argument("--direction_type", type=str, default="naive_random",
                        choices = ["naive_random", "cov_random", "real_direction"])
-    parser.add_argument("--seed", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=23)
     
     args = parser.parse_args()
 
     # set seed
     random.seed(args.seed)
     torch.manual_seed(args.seed)
+    print(f"running {args.direction_type}")
 
     
     print("loading sae and model")
-    ## load a gpt2-small model
+    ## load gpt2-small model, but choose any sae model (since the sae model doesn't matter)
     args.e2e = "h9hrelni"
 
     if args.e2e is None:
@@ -283,7 +303,6 @@ if __name__ == '__main__':
         args.layer,
         args.direction_type,
         args.device,
-        args.seed
         args.batch_size, 
         args.pos, 
         args.hook_loc,
@@ -294,9 +313,7 @@ if __name__ == '__main__':
     os.makedirs(save_path, exist_ok=True)
     pos_label = 'all' if args.pos is None else args.pos
     
-    save_name = f"{args.direction_type}_seed_{seed}_layer_{args.layer}_pos_{pos_label}.csv"
+    save_name = f"{args.direction_type}_seed_{args.seed}_layer_{args.layer}_pos_{pos_label}.csv"
 
-    # if args.e2e is not None:
-    #     save_name = f"e2e_{args.e2e}_" + save_name
     
     result_df.to_csv(os.path.join(save_path, save_name), index=False)
