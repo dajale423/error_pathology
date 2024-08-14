@@ -25,7 +25,7 @@ simplefilter(action="ignore", category=pd.errors.PerformanceWarning)
 
 ## define hook functions
 ## write code in a way you have an activation, and you are moving towards another activation, whether it is random or real
-def naive_random(activation, hook, to_vector, length, pos=None):
+def towards_a_vector(activation, hook, to_vector, length, pos=None):
     new_direction = (to_vector - activation)
     new_direction_unit_vector = new_direction/new_direction.norm(dim=-1, keepdim=True)
     perturbed_activation = activation + new_direction_unit_vector * length
@@ -36,12 +36,8 @@ def naive_random(activation, hook, to_vector, length, pos=None):
         activation[:, pos] = perturbed_activation[:, pos]    
     return activation
 
-#use mean and covariance from activation
-def covariance_random(activation, hook, multiNormal, length, device, pos=None):
-    to_vector = multiNormal.sample().to(device)
-    new_direction = (to_vector - activation)
-    new_direction_unit_vector = new_direction/new_direction.norm(dim=-1, keepdim=True)
-
+def perturb_along_vector(activation, hook, perturb_vector, length, pos=None):
+    new_direction_unit_vector = perturb_vector/perturb_vector.norm(dim=-1, keepdim=True)
     perturbed_activation = activation + new_direction_unit_vector * length
 
     if pos is None:
@@ -49,23 +45,37 @@ def covariance_random(activation, hook, multiNormal, length, device, pos=None):
     else:
         activation[:, pos] = perturbed_activation[:, pos]    
     return activation
+
+# #use mean and covariance from activation
+# def covariance_random(activation, hook, to_vector, length, pos=None):
+#     print(to_vector.shape)
+#     print(activation.shape)
+#     new_direction = (to_vector - activation)
+#     new_direction_unit_vector = new_direction/new_direction.norm(dim=-1, keepdim=True)
+#     perturbed_activation = activation + new_direction_unit_vector * length
+
+#     if pos is None:
+#         activation[:] = perturbed_activation
+#     else:
+#         activation[:, pos] = perturbed_activation[:, pos]    
+#     return activation
 
 #point towards another random real direction
-def real_direction(activation, hook, all_activations, length, pos=None):
-    tensor_length = all_activations.shape[0]
-    random_index = random.sample(range(tensor_length), 1)
-    to_vector = token_tensor[random_index,:]
+# def real_direction(activation, hook, all_activations, length, pos=None):
+#     tensor_length = all_activations.shape[0]
+#     random_index = random.sample(range(tensor_length), 1)
+#     to_vector = token_tensor[random_index,:]
     
-    new_direction = (to_vector - activation)
-    new_direction_unit_vector = new_direction/new_direction.norm(dim=-1, keepdim=True)
+#     new_direction = (to_vector - activation)
+#     new_direction_unit_vector = new_direction/new_direction.norm(dim=-1, keepdim=True)
 
-    perturbed_activation = activation + new_direction_unit_vector * length
+#     perturbed_activation = activation + new_direction_unit_vector * length
 
-    if pos is None:
-        activation[:] = perturbed_activation
-    else:
-        activation[:, pos] = perturbed_activation[:, pos]    
-    return activation
+#     if pos is None:
+#         activation[:] = perturbed_activation
+#     else:
+#         activation[:, pos] = perturbed_activation[:, pos]    
+#     return activation
 
 
 def create_ablation_hooks(direction_type, device, activations_shape, pos= None, multiNormal = None, all_activations = None, length_ranges="Normal"):
@@ -76,23 +86,26 @@ def create_ablation_hooks(direction_type, device, activations_shape, pos= None, 
     elif length_ranges == "Short":
         length_list = list(range(1, 30))
         length_list = [x/10 for x in length_list]
-    
-    if direction_type == "naive_random":
-        to_vector = torch.randn(activations_shape)        
-        for length in length_list:
-            ablation_hooks.append((f'length_{length}', 
-                                   partial(naive_random, to_vector = to_vector, length = length, pos=pos)))
-    elif direction_type == "cov_random":
-        for length in length_list:
-            ablation_hooks.append((f'length_{length}', 
-                                   partial(covariance_random, multiNormal= multiNormal, length = length,
-                                           device=device, pos=pos)))
-    elif direction_type == "real_direction":
-        for length in length_list:
-            ablation_hooks.append((f'length_{length}', 
-                                   partial(real_direction, all_activations=all_activations,
-                                           length = length, pos=pos)))
+        
+    if "naive_random" in direction_type:
+        to_vector = torch.randn(activations_shape).to(device)
+    elif "cov_random" in direction_type:
+        to_vector = multiNormal.sample(sample_shape = [activations_shape[0], activations_shape[1]]).to(device)
+    elif "real_direction" in direction_type:
+        tensor_length = all_activations.shape[0]
+        activation_num = activations_shape[0] * activations_shape[1] # get number of activations to sample
+        random_indexes = torch.randperm(tensor_length)[:activation_num]
+        to_vector = all_activations[random_indexes,:]
+        to_vector = einops.rearrange(to_vector, "(batch seq) n_hidden -> batch seq n_hidden", batch = activations_shape[0])
 
+    if "_to" in direction_type:
+        for length in length_list:
+            ablation_hooks.append((f'length_{length}', 
+                               partial(perturb_along_vector, perturb_vector = to_vector, length = length, pos=pos)))
+    else:
+        for length in length_list:
+            ablation_hooks.append((f'length_{length}', 
+                                   partial(towards_a_vector, to_vector = to_vector, length = length, pos=pos)))
     return ablation_hooks
 
 def run_all_ablations(model, batch_tokens, ablation_hooks, layer, device, hook_loc):
@@ -210,11 +223,10 @@ def run_error_eval_experiment(model, token_tensor, layer, direction_type, device
     
     activation_loc = utils.get_act_name(hook_loc, layer)
 
-    if direction_type != "naive_random":
+    if ("cov_random" in direction_type) |("real_direction" in direction_type):
         all_activations = get_all_activations(dataloader, model, activation_loc, e2e, remove_first_token)
-        print(all_activations.shape)
 
-        if direction_type == "cov_random":
+        if "cov_random" in direction_type:
             covariance = torch.cov(all_activations.T)
             torch.save(covariance, 'covariance.pt')
             mean = torch.mean(all_activations.T, dim = 1)
@@ -226,9 +238,10 @@ def run_error_eval_experiment(model, token_tensor, layer, direction_type, device
             
             multiNormal = torch.distributions.multivariate_normal.MultivariateNormal(mean.to("cpu"), cov.to("cpu"))
             del all_activations
-        if direction_type == "real_direction":
+            
+        if "real_direction" in direction_type:
             tensor_length = all_activations.shape[0]
-            random_indexes = torch.randperm(tensor_length)[:500000]
+            random_indexes = torch.randperm(tensor_length)[:500000] # sample 500,000 vectors for memory purposes
             sampled_activations = all_activations[random_indexes,:]            
     
     result_dfs = []
@@ -246,15 +259,17 @@ def run_error_eval_experiment(model, token_tensor, layer, direction_type, device
                 )
             
 
-            if direction_type == "naive_random":
+            if ("naive_random" in direction_type):
                 ablation_hooks = create_ablation_hooks(direction_type=direction_type,  activations_shape = activations.shape, 
                                                    device=device, pos=pos, length_ranges=length_ranges)
-            elif direction_type == "cov_random":
-                ablation_hooks = create_ablation_hooks(direction_type=direction_type, device=device, pos=pos,
+            elif ("cov_random" in direction_type):
+                ablation_hooks = create_ablation_hooks(direction_type=direction_type, activations_shape = activations.shape, 
+                                                       device=device, pos=pos,
                                                        multiNormal=multiNormal, length_ranges=length_ranges)
-            elif direction_type == "real_direction":
-                ablation_hooks = create_ablation_hooks(direction_type=direction_type, device=device, pos=pos,
-                                                       all_activations=all_activations, length_ranges=length_ranges)
+            elif ("real_direction" in direction_type):
+                ablation_hooks = create_ablation_hooks(direction_type=direction_type, activations_shape = activations.shape, 
+                                                       device=device, pos=pos,
+                                                       all_activations=sampled_activations, length_ranges=length_ranges)
             
             if hook_loc == "z":
                 ablation_hooks = [
@@ -288,7 +303,8 @@ if __name__ == '__main__':
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--e2e", type=str, default=None)
     parser.add_argument("--direction_type", type=str, default="naive_random",
-                       choices = ["naive_random", "cov_random", "real_direction"])
+                       choices = ["naive_random", "cov_random", "real_direction", 
+                                  "naive_random_to", "cov_random_to", "real_direction_to"])
     parser.add_argument("--seed", type=int, default=23)
     parser.add_argument("--length_ranges", type=str, default="Normal")
     
