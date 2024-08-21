@@ -22,6 +22,8 @@ from e2e_sae import SAETransformer
 import random
 
 from error_eval import cos_sim, load_sae, load_attn_sae
+from perturbations import run_all_ablations
+
 
 def feature_extrapolation(activation, hook, feature_acts, alive_features, sae_dict, random_uniform, length, 
                           feature_type = "alive", pos=None):
@@ -64,47 +66,6 @@ def create_ablation_hooks(feature_acts, alive_features, sae_dict, pos=None):
                                            alive_features=alive_features, sae_dict=sae_dict, random_uniform=random_uniform,
                                            length = length, feature_type = feature_type, pos=pos)))
     return ablation_hooks
-
-def run_all_ablations(model, batch_tokens, ablation_hooks, layer, hook_loc="resid_pre"):
-    
-    orginal_logits = model(batch_tokens)
-    
-    batch_size, seq_len = batch_tokens.shape
-    batch_result_df = pd.DataFrame({
-        "token": batch_tokens[:, :-1].flatten().cpu().numpy(),
-        "position": einops.repeat(
-            np.arange(seq_len), "seq -> batch seq", batch=batch_size)[:, :-1].flatten(),
-        "loss": utils.lm_cross_entropy_loss(
-            orginal_logits, batch_tokens, per_token=True).flatten().cpu().numpy(),
-    })
-    
-    original_log_probs = orginal_logits.log_softmax(dim=-1)
-    del orginal_logits
-    
-    for hook_name, hook in ablation_hooks:
-        
-        intervention_logits = model.run_with_hooks(
-            batch_tokens,
-            fwd_hooks=[(utils.get_act_name(hook_loc, layer), hook)]
-        )
-        
-        intervention_loss = utils.lm_cross_entropy_loss(
-            intervention_logits, batch_tokens, per_token=True
-        )#.flatten().cpu().numpy()
-        
-        intervention_log_probs = intervention_logits.log_softmax(dim=-1)
-        
-        intervention_kl_div = F.kl_div(
-            intervention_log_probs, 
-            original_log_probs,
-            log_target=True, 
-            reduction='none'
-        ).sum(dim=-1)
-        
-        batch_result_df[hook_name + "_loss"] = intervention_loss.flatten().cpu().numpy()
-        batch_result_df[hook_name + "_kl"] = intervention_kl_div[:, :-1].flatten().cpu().numpy()
-    
-    return batch_result_df
 
 def get_alive_features(dataloader, sae, model, activation_loc, e2e):
     ## we want to save a tensor of active activations

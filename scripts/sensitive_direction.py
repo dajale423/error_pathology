@@ -22,6 +22,9 @@ import random
 from warnings import simplefilter
 simplefilter(action="ignore", category=pd.errors.PerformanceWarning)
 
+from perturbations import run_all_ablations
+
+
 
 ## define hook functions
 ## write code in a way you have an activation, and you are moving towards another activation, whether it is random or real
@@ -78,111 +81,46 @@ def perturb_along_vector(activation, hook, perturb_vector, length, pos=None):
 #     return activation
 
 
-def create_ablation_hooks(direction_type, device, activations_shape, pos= None, multiNormal = None, all_activations = None, length_ranges="Normal"):
+def create_ablation_hooks(direction_type, subtraction, device, activations_shape, pos= None, multiNormal = None, all_activations = None, length_ranges="Normal"):
     ablation_hooks = []
+    
 
     if length_ranges == "Normal":
-        length_list = list(range(1, 20, 2)) + list(range(20, 50, 4)) + list(range(51, 211, 10))
+        length_list = list(range(1, 20, 2)) + list(range(20, 50, 4)) + list(range(51, 101, 10))
     elif length_ranges == "Short":
         length_list = list(range(1, 30))
         length_list = [x/10 for x in length_list]
         
     if "naive_random" in direction_type:
         to_vector = torch.randn(activations_shape).to(device)
+        to_vector = to_vector * 121 #121 is the median norm in layer 6
     elif "cov_random" in direction_type:
-        to_vector = multiNormal.sample(sample_shape = [activations_shape[0], activations_shape[1]]).to(device)
-    elif "real_direction" in direction_type:
+        if subtraction == "mixture":
+            vector_1 = multiNormal.sample(sample_shape = [activations_shape[0], activations_shape[1]]).to(device)
+            vector_2 = multiNormal.sample(sample_shape = [activations_shape[0], activations_shape[1]]).to(device)
+            to_vector = vector_1 - vector_2
+        elif subtraction == "itself":
+            to_vector = multiNormal.sample(sample_shape = [activations_shape[0], activations_shape[1]]).to(device)
+    elif direction_type == "real_direction":
         tensor_length = all_activations.shape[0]
         activation_num = activations_shape[0] * activations_shape[1] # get number of activations to sample
         random_indexes = torch.randperm(tensor_length)[:activation_num]
         to_vector = all_activations[random_indexes,:]
         to_vector = einops.rearrange(to_vector, "(batch seq) n_hidden -> batch seq n_hidden", batch = activations_shape[0])
+    elif direction_type == "zero":
+        to_vector = torch.zeros(activations_shape).to(device)
 
-    if "_to" in direction_type:
+
+    if subtraction == "mixture": # perturb along the vector
         for length in length_list:
             ablation_hooks.append((f'length_{length}', 
                                partial(perturb_along_vector, perturb_vector = to_vector, length = length, pos=pos)))
-    else:
+    elif subtraction == "itself":
         for length in length_list:
             ablation_hooks.append((f'length_{length}', 
                                    partial(towards_a_vector, to_vector = to_vector, length = length, pos=pos)))
     return ablation_hooks
 
-def run_all_ablations(model, batch_tokens, ablation_hooks, layer, device, hook_loc):
-    
-    orginal_logits = model(batch_tokens)
-    
-    batch_size, seq_len = batch_tokens.shape
-    batch_result_df = pd.DataFrame({
-        "token": batch_tokens[:, :-1].flatten().cpu().numpy(),
-        "position": einops.repeat(
-            np.arange(seq_len), "seq -> batch seq", batch=batch_size)[:, :-1].flatten(),
-        "loss": utils.lm_cross_entropy_loss(
-            orginal_logits, batch_tokens, per_token=True).flatten().cpu().numpy(),
-    })
-    
-    original_log_probs = orginal_logits.log_softmax(dim=-1)
-    del orginal_logits
-
-    final_resid_post_store = torch.zeros((batch_tokens.shape[0], batch_tokens.shape[1], 768), device=device)
-    perturbed_final_resid_post_store = torch.zeros((batch_tokens.shape[0], batch_tokens.shape[1], 768), device=device)
-
-    def get_activation(
-        activation, hook
-    ):
-        '''
-        Get the activation
-        '''
-        final_resid_post_store[:, :] = activation[:, :].detach()
-    
-    def get_activation_perturbed(
-        activation, hook
-    ):
-        '''
-        Get the activation
-        '''
-        perturbed_final_resid_post_store[:, :] = activation[:, :].detach()
-
-    activation_loc_end = utils.get_act_name("resid_post", 11)
-    model.run_with_hooks(
-        batch_tokens, 
-        return_type=None, # For efficiency, we don't need to calculate the logits
-        fwd_hooks=[(activation_loc_end, get_activation)]
-    )
-
-    
-    for hook_name, hook in ablation_hooks:
-        
-        # intervention_logits = model.run_with_hooks(
-        #     batch_tokens,
-        #     fwd_hooks=[(utils.get_act_name(hook_loc, layer), hook)]
-        # )
-        intervention_logits = model.run_with_hooks(
-            batch_tokens,
-            fwd_hooks=[(utils.get_act_name(hook_loc, layer), hook),
-                      (activation_loc_end, get_activation_perturbed)]
-        )
-        
-        intervention_loss = utils.lm_cross_entropy_loss(
-            intervention_logits, batch_tokens, per_token=True
-        )#.flatten().cpu().numpy()
-        
-        intervention_log_probs = intervention_logits.log_softmax(dim=-1)
-        
-        intervention_kl_div = F.kl_div(
-            intervention_log_probs, 
-            original_log_probs,
-            log_target=True, 
-            reduction='none'
-        ).sum(dim=-1)
-
-        intervention_final_L2 = torch.linalg.vector_norm(final_resid_post_store - perturbed_final_resid_post_store, ord=2, dim=-1)
-        
-        batch_result_df[hook_name + "_loss"] = intervention_loss.flatten().cpu().numpy()
-        batch_result_df[hook_name + "_kl"] = intervention_kl_div[:, :-1].flatten().cpu().numpy()
-        batch_result_df[hook_name + "_blocks.11.hook_resid_post_L2"] = intervention_final_L2[:, :-1].flatten().cpu().numpy()
-    
-    return batch_result_df
 
 def get_all_activations(dataloader, model, activation_loc, e2e, remove_first_token = True):
     ## we want to save a tensor of active activations
@@ -211,7 +149,7 @@ def get_all_activations(dataloader, model, activation_loc, e2e, remove_first_tok
         return all_activations
 
 
-def run_error_eval_experiment(model, token_tensor, layer, direction_type, device,  batch_size=64, pos=None, 
+def run_error_eval_experiment(model, token_tensor, layer, direction_type, subtraction, device,  batch_size=64, pos=None, 
                               hook_loc="resid_pre", e2e = None, remove_first_token = True, length_ranges = "Normal"):
     # sae.eval()  # prevents error if we're expecting a dead neuron mask for who grads
 
@@ -235,14 +173,17 @@ def run_error_eval_experiment(model, token_tensor, layer, direction_type, device
             cov = covariance.clone()
             mask = cov.diagonal()
             cov += torch.diag(mask).bool().float() * 0.01
-            
             multiNormal = torch.distributions.multivariate_normal.MultivariateNormal(mean.to("cpu"), cov.to("cpu"))
             del all_activations
             
-        if "real_direction" in direction_type:
-            tensor_length = all_activations.shape[0]
-            random_indexes = torch.randperm(tensor_length)[:500000] # sample 500,000 vectors for memory purposes
-            sampled_activations = all_activations[random_indexes,:]            
+        if direction_type == "real_direction":
+            if subtraction == "mixture":
+                tensor_length = all_activations.shape[0]
+                random_indexes = torch.randperm(tensor_length)
+                all_subtractions = all_activations - all_activations[random_indexes]
+                # remove all rows where subtracted itself
+                all_subtractions = all_subtractions[all_subtractions.abs().sum(dim=1) != 0]
+                del all_activations
     
     result_dfs = []
     for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
@@ -259,17 +200,23 @@ def run_error_eval_experiment(model, token_tensor, layer, direction_type, device
                 )
             
 
-            if ("naive_random" in direction_type):
-                ablation_hooks = create_ablation_hooks(direction_type=direction_type,  activations_shape = activations.shape, 
+            if (direction_type == "naive_random") or (direction_type == "zero"):
+                ablation_hooks = create_ablation_hooks(direction_type=direction_type, subtraction=subtraction,  
+                                                       activations_shape = activations.shape, 
                                                    device=device, pos=pos, length_ranges=length_ranges)
-            elif ("cov_random" in direction_type):
-                ablation_hooks = create_ablation_hooks(direction_type=direction_type, activations_shape = activations.shape, 
-                                                       device=device, pos=pos,
+            elif "cov_random" in direction_type:
+                ablation_hooks = create_ablation_hooks(direction_type=direction_type, subtraction=subtraction,
+                                                       activations_shape = activations.shape, device=device, pos=pos,
                                                        multiNormal=multiNormal, length_ranges=length_ranges)
-            elif ("real_direction" in direction_type):
-                ablation_hooks = create_ablation_hooks(direction_type=direction_type, activations_shape = activations.shape, 
-                                                       device=device, pos=pos,
-                                                       all_activations=sampled_activations, length_ranges=length_ranges)
+            elif direction_type == "real_direction":
+                if subtraction == "itself":
+                    ablation_hooks = create_ablation_hooks(direction_type=direction_type, subtraction=subtraction, 
+                                                           activations_shape = activations.shape, device=device, pos=pos,
+                                                           all_activations=all_activations, length_ranges=length_ranges)
+                elif subtraction == "mixture":
+                    ablation_hooks = create_ablation_hooks(direction_type=direction_type, subtraction=subtraction, 
+                                                           activations_shape = activations.shape, device=device, pos=pos,
+                                                           all_activations=all_subtractions, length_ranges=length_ranges)
             
             if hook_loc == "z":
                 ablation_hooks = [
@@ -303,18 +250,21 @@ if __name__ == '__main__':
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--e2e", type=str, default=None)
     parser.add_argument("--direction_type", type=str, default="naive_random",
-                       choices = ["naive_random", "cov_random", "real_direction", 
-                                  "naive_random_to", "cov_random_to", "real_direction_to"])
+                       choices = ["zero", "naive_random", "cov_random", "real_direction"])
+    parser.add_argument("--subtraction", type=str, default="itself",
+                       choices = ["itself", "mixture"])
     parser.add_argument("--seed", type=int, default=23)
-    parser.add_argument("--length_ranges", type=str, default="Normal")
+    parser.add_argument("--length_ranges", type=str, default="Normal",
+                       choices = ["Normal", "Short"])
     
     args = parser.parse_args()
 
     # set seed
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    print(f"running {args.direction_type}")
-
+    print(f"running {args.direction_type}, {args.subtraction}")
+    print(f"layer {args.layer}")
+    print(f"length ranges:  {args.length_ranges}")
     
     print("loading sae and model")
     ## load gpt2-small model, but choose any sae model (since the sae model doesn't matter)
@@ -359,6 +309,7 @@ if __name__ == '__main__':
         token_tensor, 
         args.layer,
         args.direction_type,
+        args.subtraction,
         args.device,
         args.batch_size, 
         args.pos, 
@@ -371,9 +322,8 @@ if __name__ == '__main__':
     os.makedirs(save_path, exist_ok=True)
     pos_label = 'all' if args.pos is None else args.pos
 
-    save_name = f"{args.direction_type}_seed_{args.seed}_layer_{args.layer}_pos_{pos_label}.csv"
+    save_name = f"{args.direction_type}_{args.subtraction}_seed_{args.seed}_layer_{args.layer}_pos_{pos_label}"
     
     if args.length_ranges == "Short":
-        save_name = f"{args.direction_type}_seed_{args.seed}_layer_{args.layer}_pos_{pos_label}_short.csv"
-    
-    result_df.to_csv(os.path.join(save_path, save_name), index=False)
+        save_name = save_name + "_short"
+    result_df.to_csv(os.path.join(save_path, save_name + ".csv"), index=False)
