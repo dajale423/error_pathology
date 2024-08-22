@@ -17,7 +17,8 @@ from sae_training.utils import LMSparseAutoencoderSessionloader
 
 from e2e_sae import SAETransformer
 
-from error_eval import cos_sim
+from error_eval import cos_sim, load_sae, load_attn_sae
+from perturbations import run_all_ablations
 
 def error_extrapolation(activation, hook, sae_out, length, pos=None):
     error_vector = (sae_out - activation)
@@ -34,96 +35,13 @@ def error_extrapolation(activation, hook, sae_out, length, pos=None):
 
 def create_ablation_hooks(sae_out, pos=None):
     ablation_hooks = []
-    for length in range(1, 211, 10):
-        ablation_hooks.append((f'error_length_{length}', 
+    length_list = list(range(1, 20, 2)) + list(range(20, 50, 4)) + list(range(51, 101, 10))
+    for length in length_list:
+        ablation_hooks.append((f'length_{length}', 
                                partial(error_extrapolation, sae_out=sae_out, length = length, pos=pos)))
     return ablation_hooks
 
-def run_all_ablations(model, batch_tokens, ablation_hooks, layer, hook_loc="resid_pre"):
-    
-    orginal_logits = model(batch_tokens)
-    
-    batch_size, seq_len = batch_tokens.shape
-    batch_result_df = pd.DataFrame({
-        "token": batch_tokens[:, :-1].flatten().cpu().numpy(),
-        "position": einops.repeat(
-            np.arange(seq_len), "seq -> batch seq", batch=batch_size)[:, :-1].flatten(),
-        "loss": utils.lm_cross_entropy_loss(
-            orginal_logits, batch_tokens, per_token=True).flatten().cpu().numpy(),
-    })
-    
-    original_log_probs = orginal_logits.log_softmax(dim=-1)
-    del orginal_logits
-    
-    for hook_name, hook in ablation_hooks:
-        
-        intervention_logits = model.run_with_hooks(
-            batch_tokens,
-            fwd_hooks=[(utils.get_act_name(hook_loc, layer), hook)]
-        )
-        
-        intervention_loss = utils.lm_cross_entropy_loss(
-            intervention_logits, batch_tokens, per_token=True
-        )#.flatten().cpu().numpy()
-        
-        intervention_log_probs = intervention_logits.log_softmax(dim=-1)
-        
-        intervention_kl_div = F.kl_div(
-            intervention_log_probs, 
-            original_log_probs,
-            log_target=True, 
-            reduction='none'
-        ).sum(dim=-1)
-        
-        batch_result_df[hook_name + "_loss"] = intervention_loss.flatten().cpu().numpy()
-        batch_result_df[hook_name + "_kl"] = intervention_kl_div[:, :-1].flatten().cpu().numpy()
-    
-    return batch_result_df
-
-
-def load_sae(layer):
-    REPO_ID = "jbloom/GPT2-Small-SAEs"
-    FILENAME = f"final_sparse_autoencoder_gpt2-small_blocks.{layer}.hook_resid_pre_24576.pt"
-    path = hf_hub_download(repo_id=REPO_ID, filename=FILENAME)
-    
-    model, sparse_autoencoder, _ = (
-        LMSparseAutoencoderSessionloader.load_session_from_pretrained(path=path)
-    )
-    
-    sae_group = SAEGroup(sparse_autoencoder['cfg'])
-
-    sae = sae_group.autoencoders[0]
-    
-    sae.load_state_dict(sparse_autoencoder['state_dict'])
-    
-    sae.eval() 
-    
-    return sae, model
-
-
-def load_attn_sae(layer):
-    auto_encoder_names = {
-        0 : "gpt2-small_L0_Hcat_z_lr1.20e-03_l11.80e+00_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v9",
-        1 : "gpt2-small_L1_Hcat_z_lr1.20e-03_l18.00e-01_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v5",
-        2 : "gpt2-small_L2_Hcat_z_lr1.20e-03_l11.00e+00_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v4",
-        3 : "gpt2-small_L3_Hcat_z_lr1.20e-03_l19.00e-01_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v9",
-        4 : "gpt2-small_L4_Hcat_z_lr1.20e-03_l11.10e+00_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v7",
-        5 : "gpt2-small_L5_Hcat_z_lr1.20e-03_l11.00e+00_ds49152_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v9",
-        6 : "gpt2-small_L6_Hcat_z_lr1.20e-03_l11.10e+00_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v9",
-        7 : "gpt2-small_L7_Hcat_z_lr1.20e-03_l11.10e+00_ds49152_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v9",
-        8 : "gpt2-small_L8_Hcat_z_lr1.20e-03_l11.30e+00_ds24576_bs4096_dc1.00e-05_rsanthropic_rie25000_nr4_v6",
-        9 : "gpt2-small_L9_Hcat_z_lr1.20e-03_l11.20e+00_ds24576_bs4096_dc1.00e-06_rsanthropic_rie25000_nr4_v9",
-        10 : "gpt2-small_L10_Hcat_z_lr1.20e-03_l11.30e+00_ds24576_bs4096_dc1.00e-05_rsanthropic_rie25000_nr4_v9",
-        11 : "gpt2-small_L11_Hcat_z_lr1.20e-03_l13.00e+00_ds24576_bs4096_dc3.16e-06_rsanthropic_rie25000_nr4_v9"
-    }
-    auto_encoder_run = auto_encoder_names[layer]
-    encoder = AutoEncoder.load_from_hf(auto_encoder_run, hf_repo="ckkissane/attn-saes-gpt2-small-all-layers")
-    model = HookedTransformer.from_pretrained(encoder.cfg["model_name"]).to(DTYPES[encoder.cfg["enc_dtype"]]).to(encoder.cfg["device"])
-    
-    return encoder, model
-
-
-def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, pos=None, hook_loc="resid_pre", e2e = False):
+def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, pos=None, hook_loc="resid_pre", e2e = False, device = "cuda:0"):
     sae.eval()  # prevents error if we're expecting a dead neuron mask for who grads
 
     dataloader = torch.utils.data.DataLoader(
@@ -163,7 +81,7 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
                     for name, hook_fn in ablation_hooks
                 ]
             
-            batch_result_df = run_all_ablations(model, batch_tokens, ablation_hooks, layer=layer, hook_loc=hook_loc)
+            batch_result_df = run_all_ablations(model, batch_tokens, ablation_hooks, layer=layer, hook_loc=hook_loc, device=device)
             
             l0 = (feature_acts > 0).float().sum(dim=-1).cpu().numpy()[:, :-1].flatten()
             l1 = feature_acts.abs().sum(dim=-1).cpu().numpy()[:, :-1].flatten()
@@ -187,7 +105,7 @@ if __name__ == '__main__':
     parser.add_argument("--hook_loc", type=str, default="resid_pre")
     parser.add_argument("--layer", type=int, required=True)
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--output_dir", type=str, default="error_extrapolation_results")
+    parser.add_argument("--output_dir", type=str, default="error_extrapolation")
     parser.add_argument("--pos", type=int, default=None)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--repeat", type=int, default=1)
@@ -195,6 +113,7 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
 
+    print("error extrapolation")
     print("loading sae and model")
 
     if args.e2e is None:
@@ -209,6 +128,7 @@ if __name__ == '__main__':
         e2e_tag = True
         model_id = args.e2e
         text = "sparsify/gpt2/" + model_id
+        print(f"running model: {model_id}")
         sae_transformer_model = SAETransformer.from_wandb(text)
 
         model = sae_transformer_model.tlens_model

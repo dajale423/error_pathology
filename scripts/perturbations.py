@@ -16,12 +16,15 @@ from sae_training.sae_group import SAEGroup
 from sae_training.utils import LMSparseAutoencoderSessionloader
 
 from e2e_sae import SAETransformer
-from error_eval import cos_sim, load_sae, load_attn_sae
 import random 
 
-from warnings import simplefilter
-simplefilter(action="ignore", category=pd.errors.PerformanceWarning)
-from perturbations import run_all_ablations
+
+def cos_sim(a, b):
+    return einops.einsum(
+        a, 
+        b, 
+        "batch seq dim, batch seq dim -> batch seq"
+    ) / (a.norm(dim=-1) * b.norm(dim=-1))
 
 
 def run_all_ablations(model, batch_tokens, ablation_hooks, layer, device, hook_loc):

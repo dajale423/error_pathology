@@ -21,12 +21,12 @@ from sae_training.utils import LMSparseAutoencoderSessionloader
 from e2e_sae import SAETransformer
 import random
 
-from error_eval import cos_sim, load_sae, load_attn_sae
-from perturbations import run_all_ablations
+from error_eval import load_sae, load_attn_sae
+from perturbations import cos_sim, run_all_ablations
 
 
 def feature_extrapolation(activation, hook, feature_acts, alive_features, sae_dict, random_uniform, length, 
-                          feature_type = "alive", pos=None):
+                          feature_type = "active", pos=None):
     # randomly sample an index
     if feature_type == "alive":
         # take out features that are active for that batch
@@ -53,18 +53,36 @@ def feature_extrapolation(activation, hook, feature_acts, alive_features, sae_di
         
     return activation
 
-## we should have the same index for different lengths
-def create_ablation_hooks(feature_acts, alive_features, sae_dict, pos=None):
-    ablation_hooks = []
-    random_uniform = np.random.uniform(low = 0.0, high = 1.0, size = (feature_acts.shape[0], feature_acts.shape[1]))
-    for feature_type in ["alive", "active", "dead"]:
+def perturb_along_vector(activation, hook, perturb_vector, length, pos=None):
+    new_direction_unit_vector = perturb_vector/perturb_vector.norm(dim=-1, keepdim=True)
+    perturbed_activation = activation + new_direction_unit_vector * length
 
-        # generate random uniform of length batch_size
-        for length in range(1, 211, 10):
-            ablation_hooks.append((f'{feature_type}_feature_length_{length}', 
-                                   partial(feature_extrapolation, feature_acts=feature_acts,
-                                           alive_features=alive_features, sae_dict=sae_dict, random_uniform=random_uniform,
-                                           length = length, feature_type = feature_type, pos=pos)))
+    if pos is None:
+        activation[:] = perturbed_activation
+    else:
+        activation[:, pos] = perturbed_activation[:, pos]    
+    return activation
+
+## we should have the same index for different lengths
+def create_ablation_hooks(feature_acts, alive_features, sae_dict, pos=None, feature_type="alive"):
+    length_list = list(range(1, 20, 2)) + list(range(20, 50, 4)) + list(range(51, 101, 10))
+
+    if feature_type == "alive":
+        nonactive_features = alive_features - (feature_acts > 1e-8).to(int).sum(dim = (0, 1)).to(bool).to(int) #remove currently active features
+        features_all = (nonactive_features == 1).nonzero()
+        activation_num = feature_acts.shape[0] * feature_acts.shape[1] # get number of activations to sample
+        random_indexes = torch.randperm(features_all.shape[0])
+
+        ## sample some random number of alive features
+        feature_vector = sae_dict[:, features_all[random_indexes[:activation_num]]]
+        feature_vector = einops.rearrange(feature_vector, "n_dim seq batch -> batch seq n_dim")
+        
+    ablation_hooks = []
+    # generate random uniform of length batch_size
+    for length in length_list:
+        ablation_hooks.append((f'length_{length}', 
+                               partial(perturb_along_vector, perturb_vector=feature_vector,
+                                       length = length, pos=pos)))
     return ablation_hooks
 
 def get_alive_features(dataloader, sae, model, activation_loc, e2e):
@@ -99,7 +117,7 @@ def get_alive_features(dataloader, sae, model, activation_loc, e2e):
     return active_features_all
 
 
-def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, pos=None, hook_loc="resid_pre", e2e = False):
+def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, pos=None, hook_loc="resid_pre", e2e = False, feature_type = "alive", device = "cuda:0"):
     sae.eval()  # prevents error if we're expecting a dead neuron mask for who grads
 
     dataloader = torch.utils.data.DataLoader(
@@ -117,6 +135,15 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
 
     result_dfs = []
     sae_dict = sae.dict_elements
+
+    if feature_type == "alive":
+        batch_size = 1
+
+    dataloader = torch.utils.data.DataLoader(
+        token_tensor,
+        batch_size=batch_size,
+        shuffle=False
+    )
     
     with torch.inference_mode():
         for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
@@ -137,7 +164,7 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
             else:
                 sae_out, feature_acts, _, _, _, _ = sae(activations)
 
-            ablation_hooks = create_ablation_hooks(feature_acts, alive_features, sae_dict, pos=pos)
+            ablation_hooks = create_ablation_hooks(feature_acts, alive_features, sae_dict, pos=pos, feature_type=feature_type)
             
             if hook_loc == "z":
                 ablation_hooks = [
@@ -145,7 +172,7 @@ def run_error_eval_experiment(sae, model, token_tensor, layer, batch_size=64, po
                     for name, hook_fn in ablation_hooks
                 ]
             
-            batch_result_df = run_all_ablations(model, batch_tokens, ablation_hooks, layer=layer, hook_loc=hook_loc)
+            batch_result_df = run_all_ablations(model, batch_tokens, ablation_hooks, layer=layer, hook_loc=hook_loc, device=device)
             
             l0 = (feature_acts > 0).float().sum(dim=-1).cpu().numpy()[:, :-1].flatten()
             l1 = feature_acts.abs().sum(dim=-1).cpu().numpy()[:, :-1].flatten()
@@ -174,13 +201,18 @@ if __name__ == '__main__':
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--e2e", type=str, default=None)
+    parser.add_argument("--feature_type", type=str, default="alive",
+                       choices = ["active", "alive", "dead"])
     parser.add_argument("--seed", type=int, default=23)
+    parser.add_argument("--length_ranges", type=str, default="Normal",
+                       choices = ["Normal", "Short"])
     
     args = parser.parse_args()
     # set seed
     np.random.seed(args.seed)
     
     print("loading sae and model")
+    print(f"feature type: {args.feature_type}")
 
     if args.e2e is None:
         e2e_tag = False
@@ -222,16 +254,20 @@ if __name__ == '__main__':
         args.batch_size, 
         args.pos, 
         args.hook_loc,
-        args.e2e
+        args.e2e,
+        feature_type = args.feature_type,
+        device = args.device
     )
     
     save_path = os.path.join("../results/" + args.output_dir, f"gpt2_{args.hook_loc}")
     os.makedirs(save_path, exist_ok=True)
     pos_label = 'all' if args.pos is None else args.pos
 
-    save_name = f"layer_{args.layer}_seed_{args.seed}_batchsize_{args.batch_size}_pos_{pos_label}.csv"
+    save_name = f"feature_{args.feature_type}_layer_{args.layer}_seed_{args.seed}_pos_{pos_label}"
     
     if args.e2e is not None:
         save_name = f"e2e_{args.e2e}_" + save_name
-    
-    result_df.to_csv(os.path.join(save_path, save_name), index=False)
+
+    if args.length_ranges == "Short":
+        save_name = save_name + "_short"
+    result_df.to_csv(os.path.join(save_path, save_name + ".csv"), index=False)

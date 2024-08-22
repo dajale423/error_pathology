@@ -16,15 +16,8 @@ from sae_training.sae_group import SAEGroup
 from sae_training.utils import LMSparseAutoencoderSessionloader
 
 from e2e_sae import SAETransformer
-
-
-def cos_sim(a, b):
-    return einops.einsum(
-        a, 
-        b, 
-        "batch seq dim, batch seq dim -> batch seq"
-    ) / (a.norm(dim=-1) * b.norm(dim=-1))
-
+from perturbations import run_all_ablations, cos_sim
+from sensitive_direction import get_all_activations
 
 def reconstruction_hook(activation, hook, sae_out, pos=None):
     # print("reconstruction l2 norm", (activation - sae_out).norm(dim=-1)[-3:, -3:])
@@ -63,14 +56,9 @@ def reconstruction_w_cos_correction_hook(activation, hook, sae_out, pos=None):
     return activation
     
 
-def l2_error_preserving_perturbation_hook_covariance(activation, hook, sae_out, mean, cov, pos=None):
+def l2_error_preserving_perturbation_along_vector(activation, hook, sae_out, perturbation, pos=None):
     error = (sae_out - activation).norm(dim=-1)
 
-    #change device to cpu since mps is not supported
-    multiNormal = torch.distributions.multivariate_normal.MultivariateNormal(mean.to("cpu"), covariance.to("cpu"))
-    perturbation = multiNormal.sample()
-    
-    perturbation = torch.randn_like(activation)
     normalized_perturbation = (
         perturbation / perturbation.norm(dim=-1, keepdim=True)
         ) * error.unsqueeze(-1)
@@ -158,7 +146,7 @@ def mean_ablation_hook(activation, hook, pos=None):
     return activation
 
 
-def create_ablation_hooks(sae_out, pos=None, reshape_attn = False):
+def create_ablation_hooks(sae_out, multiNormal, all_subtractions, activations_shape, pos=None, reshape_attn = False):
     ablation_hooks = [
         (
             'substitution', 
@@ -185,6 +173,23 @@ def create_ablation_hooks(sae_out, pos=None, reshape_attn = False):
             'mean_ablation', 
             partial(mean_ablation_hook, pos=pos))
     ]
+
+    vector_1 = multiNormal.sample(sample_shape = [activations_shape[0], activations_shape[1]]).to(device)
+    vector_2 = multiNormal.sample(sample_shape = [activations_shape[0], activations_shape[1]]).to(device)
+    to_vector = vector_1 - vector_2
+
+    ablation_hooks.append(('l2_error_preserving_substitution_cov_random_subtraction', 
+                               partial(l2_error_preserving_perturbation_along_vector, perturbation = to_vector, sae_out=sae_out, pos=pos)))
+
+    tensor_length = all_subtractions.shape[0]
+    activation_num = activations_shape[0] * activations_shape[1] # get number of activations to sample
+    random_indexes = torch.randperm(tensor_length)[:activation_num]
+    to_vector = all_subtractions[random_indexes,:]
+    to_vector = einops.rearrange(to_vector, "(batch seq) n_hidden -> batch seq n_hidden", batch = activations_shape[0])
+
+    ablation_hooks.append(('l2_error_preserving_substitution_real_activation_subtraction', 
+                               partial(l2_error_preserving_perturbation_along_vector, perturbation = to_vector, sae_out=sae_out, pos=pos)))
+    
     return ablation_hooks
 
 
@@ -196,49 +201,6 @@ def attn_hook_wrapper(activation, hook, hook_fn, n_heads=12, d_head=64):
         hook_fn(activation, hook),
         "batch seq (n_heads d_head) -> batch seq n_heads d_head",
             n_heads=n_heads, d_head=d_head)
-    
-
-def run_all_ablations(model, batch_tokens, ablation_hooks, layer, hook_loc="resid_pre"):
-    
-    orginal_logits = model(batch_tokens)
-    
-    batch_size, seq_len = batch_tokens.shape
-    batch_result_df = pd.DataFrame({
-        "token": batch_tokens[:, :-1].flatten().cpu().numpy(),
-        "position": einops.repeat(
-            np.arange(seq_len), "seq -> batch seq", batch=batch_size)[:, :-1].flatten(),
-        "loss": utils.lm_cross_entropy_loss(
-            orginal_logits, batch_tokens, per_token=True).flatten().cpu().numpy(),
-    })
-    
-    original_log_probs = orginal_logits.log_softmax(dim=-1)
-    del orginal_logits
-    
-    for hook_name, hook in ablation_hooks:
-        
-        intervention_logits = model.run_with_hooks(
-            batch_tokens,
-            fwd_hooks=[(utils.get_act_name(hook_loc, layer), hook)]
-        )
-        
-        intervention_loss = utils.lm_cross_entropy_loss(
-            intervention_logits, batch_tokens, per_token=True
-        )#.flatten().cpu().numpy()
-        
-        intervention_log_probs = intervention_logits.log_softmax(dim=-1)
-        
-        intervention_kl_div = F.kl_div(
-            intervention_log_probs, 
-            original_log_probs,
-            log_target=True, 
-            reduction='none'
-        ).sum(dim=-1)
-        
-        batch_result_df[hook_name + "_loss"] = intervention_loss.flatten().cpu().numpy()
-        batch_result_df[hook_name + "_kl"] = intervention_kl_div[:, :-1].flatten().cpu().numpy()
-    
-    return batch_result_df
-
 
 def load_sae(layer):
     REPO_ID = "jbloom/GPT2-Small-SAEs"
@@ -282,7 +244,7 @@ def load_attn_sae(layer):
     return encoder, model
 
 
-def run_error_extrapolation_experiment(sae, model, token_tensor, layer, batch_size=64, pos=None, hook_loc="resid_pre", e2e = False):
+def run_error_extrapolation_experiment(sae, model, token_tensor, layer, batch_size=64, pos=None, hook_loc="resid_pre", e2e = False, device = "cuda:0"):
     sae.eval()  # prevents error if we're expecting a dead neuron mask for who grads
 
     dataloader = torch.utils.data.DataLoader(
@@ -292,6 +254,26 @@ def run_error_extrapolation_experiment(sae, model, token_tensor, layer, batch_si
     )
     
     activation_loc = utils.get_act_name(hook_loc, layer)
+
+    all_activations = get_all_activations(dataloader, model, activation_loc, e2e, remove_first_token)
+
+    # calculate multiNormal
+    covariance = torch.cov(all_activations.T)
+    torch.save(covariance, 'covariance.pt')
+    mean = torch.mean(all_activations.T, dim = 1)
+    # add a small value to ensure positive definite
+    cov = covariance.clone()
+    mask = cov.diagonal()
+    cov += torch.diag(mask).bool().float() * 0.01
+    multiNormal = torch.distributions.multivariate_normal.MultivariateNormal(mean.to("cpu"), cov.to("cpu"))
+
+    # get all activation subtractions
+    tensor_length = all_activations.shape[0]
+    random_indexes = torch.randperm(tensor_length)
+    all_subtractions = all_activations - all_activations[random_indexes]
+    # remove all rows where subtracted itself
+    all_subtractions = all_subtractions[all_subtractions.abs().sum(dim=1) != 0]
+    del all_activations
 
     result_dfs = []
     for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
@@ -313,7 +295,7 @@ def run_error_extrapolation_experiment(sae, model, token_tensor, layer, batch_si
             else:
                 sae_out, feature_acts, _, _, _, _ = sae(activations)
             
-            ablation_hooks = create_ablation_hooks(sae_out, pos=pos)
+            ablation_hooks = create_ablation_hooks(sae_out, multiNormal, all_subtractions, activations_shape = activations.shape, pos=pos)
             
             if hook_loc == "z":
                 ablation_hooks = [
@@ -321,7 +303,7 @@ def run_error_extrapolation_experiment(sae, model, token_tensor, layer, batch_si
                     for name, hook_fn in ablation_hooks
                 ]
             
-            batch_result_df = run_all_ablations(model, batch_tokens, ablation_hooks, layer=layer, hook_loc=hook_loc)
+            batch_result_df = run_all_ablations(model, batch_tokens, ablation_hooks, layer=layer, hook_loc=hook_loc, device=device)
             
             l0 = (feature_acts > 0).float().sum(dim=-1).cpu().numpy()[:, :-1].flatten()
             l1 = feature_acts.abs().sum(dim=-1).cpu().numpy()[:, :-1].flatten()
@@ -344,7 +326,7 @@ if __name__ == '__main__':
     parser.add_argument("--hook_loc", type=str, default="resid_pre")
     parser.add_argument("--layer", type=int, required=True)
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--output_dir", type=str, default="error_eval_results")
+    parser.add_argument("--output_dir", type=str, default="error_eval")
     parser.add_argument("--pos", type=int, default=None)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--repeat", type=int, default=1)
@@ -352,6 +334,7 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
 
+    print("running error eval experiment")
     print("loading sae and model")
 
     if args.e2e is None:
