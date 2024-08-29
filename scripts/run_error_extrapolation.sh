@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -c 2                               # Request one core
-#SBATCH -t 0-4:00                         # Runtime in D-HH:MM format
+#SBATCH -t 0-2:00                         # Runtime in D-HH:MM format
 #SBATCH -p gpu_quad                           # Partition to run in gpu_quad or gpu_requeue
 #SBATCH --gres=gpu:1
 #SBATCH --mem=30G                          # Memory total in MiB (for all cores)
@@ -12,20 +12,20 @@ module load gcc/9.2.0
 module load cuda/11.7
 
 # to monitor gpu usage
-# /n/cluster/bin/job_gpu_monitor.sh &
+/n/cluster/bin/job_gpu_monitor.sh &
 
-python feature_extrapolation.py --layer 6 --e2e $1 --feature_type active
+python error_extrapolation.py --layer 6 --e2e $1
 
 # local
 # python feature_extrapolation.py --layer 6 --e2e ahxwn90o
 # python feature_extrapolation.py --layer 6 --e2e 43zmudf4
 # python feature_extrapolation.py --layer 6 --e2e unji5etq
+
 # python feature_extrapolation.py --layer 6 --e2e jup3glm9
 #python feature_extrapolation.py --layer 6 --e2e h9hrelni
 #python feature_extrapolation.py --layer 6 --e2e 1jy3m5j0
 #python feature_extrapolation.py --layer 6 --e2e 4nlqrc2y
 #python feature_extrapolation.py --layer 6 --e2e 2wvu1zs5
-
 # python feature_extrapolation.py --layer 6 --e2e uiwt81f1
 
 # e2e
