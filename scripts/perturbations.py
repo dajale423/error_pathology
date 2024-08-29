@@ -27,6 +27,33 @@ def cos_sim(a, b):
     ) / (a.norm(dim=-1) * b.norm(dim=-1))
 
 
+def get_all_activations(dataloader, model, activation_loc, e2e, remove_first_token = True):
+    ## we want to save a tensor of active activations
+    ## value of 1 for alive features, 0 for dead feature
+    first = True
+    with torch.inference_mode():
+        for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
+            _, cache = model.run_with_cache(
+                    batch_tokens,
+                    prepend_bos=True,
+                    names_filter=[activation_loc]
+                )
+            activations = cache[activation_loc]    
+
+            if first:
+                all_activations = activations
+                first = False
+            else:
+                all_activations = torch.cat((all_activations, activations))
+
+        if remove_first_token: # for skipping first token
+            all_activations = all_activations[:, 1:, :]
+    
+        all_activations = einops.rearrange(all_activations, "batch seq n_hidden -> (batch seq) n_hidden")
+    
+        return all_activations
+
+
 def run_all_ablations(model, batch_tokens, ablation_hooks, layer, device, hook_loc):
     
     orginal_logits = model(batch_tokens)

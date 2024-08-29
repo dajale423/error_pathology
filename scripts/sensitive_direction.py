@@ -22,7 +22,7 @@ import random
 from warnings import simplefilter
 simplefilter(action="ignore", category=pd.errors.PerformanceWarning)
 
-from perturbations import run_all_ablations
+from perturbations import run_all_ablations, cos_sim, get_all_activations
 
 
 
@@ -121,34 +121,6 @@ def create_ablation_hooks(direction_type, subtraction, device, activations_shape
                                    partial(towards_a_vector, to_vector = to_vector, length = length, pos=pos)))
     return ablation_hooks
 
-
-def get_all_activations(dataloader, model, activation_loc, e2e, remove_first_token = True):
-    ## we want to save a tensor of active activations
-    ## value of 1 for alive features, 0 for dead feature
-    first = True
-    with torch.inference_mode():
-        for ix, batch_tokens in enumerate(tqdm.tqdm(dataloader)):
-            _, cache = model.run_with_cache(
-                    batch_tokens,
-                    prepend_bos=True,
-                    names_filter=[activation_loc]
-                )
-            activations = cache[activation_loc]    
-
-            if first:
-                all_activations = activations
-                first = False
-            else:
-                all_activations = torch.cat((all_activations, activations))
-
-        if remove_first_token: # for skipping first token
-            all_activations = all_activations[:, 1:, :]
-    
-        all_activations = einops.rearrange(all_activations, "batch seq n_hidden -> (batch seq) n_hidden")
-    
-        return all_activations
-
-
 def run_error_eval_experiment(model, token_tensor, layer, direction_type, subtraction, device,  batch_size=64, pos=None, 
                               hook_loc="resid_pre", e2e = None, remove_first_token = True, length_ranges = "Normal"):
     # sae.eval()  # prevents error if we're expecting a dead neuron mask for who grads
@@ -166,7 +138,7 @@ def run_error_eval_experiment(model, token_tensor, layer, direction_type, subtra
 
         if "cov_random" in direction_type:
             covariance = torch.cov(all_activations.T)
-            torch.save(covariance, 'covariance.pt')
+            # torch.save(covariance, 'covariance.pt')
             mean = torch.mean(all_activations.T, dim = 1)
 
             # add a small value to ensure positive definite

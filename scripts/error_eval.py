@@ -16,8 +16,7 @@ from sae_training.sae_group import SAEGroup
 from sae_training.utils import LMSparseAutoencoderSessionloader
 
 from e2e_sae import SAETransformer
-from perturbations import run_all_ablations, cos_sim
-from sensitive_direction import get_all_activations
+from perturbations import run_all_ablations, cos_sim, get_all_activations
 
 def reconstruction_hook(activation, hook, sae_out, pos=None):
     # print("reconstruction l2 norm", (activation - sae_out).norm(dim=-1)[-3:, -3:])
@@ -76,7 +75,7 @@ def l2_error_preserving_perturbation_along_vector(activation, hook, sae_out, per
     return activation
 
 #use mean and covariance from activation
-def l2_error_preserving_perturbation(activation, hook, sae_out, pos=None):
+def l2_error_preserving_perturbation_hook(activation, hook, sae_out, pos=None):
     error = (sae_out - activation).norm(dim=-1)
     perturbation = torch.randn_like(activation)
     normalized_perturbation = (
@@ -146,7 +145,7 @@ def mean_ablation_hook(activation, hook, pos=None):
     return activation
 
 
-def create_ablation_hooks(sae_out, multiNormal, all_subtractions, activations_shape, pos=None, reshape_attn = False):
+def create_ablation_hooks(sae_out, multiNormal, all_subtractions, activations_shape, pos=None, reshape_attn = False, device = "cuda:0"):
     ablation_hooks = [
         (
             'substitution', 
@@ -255,7 +254,7 @@ def run_error_extrapolation_experiment(sae, model, token_tensor, layer, batch_si
     
     activation_loc = utils.get_act_name(hook_loc, layer)
 
-    all_activations = get_all_activations(dataloader, model, activation_loc, e2e, remove_first_token)
+    all_activations = get_all_activations(dataloader, model, activation_loc, e2e, remove_first_token = True)
 
     # calculate multiNormal
     covariance = torch.cov(all_activations.T)
@@ -359,7 +358,7 @@ if __name__ == '__main__':
 
     print("loading token tensors")
     
-    token_tensor = torch.load("token_tensor.pt").to(args.device)
+    token_tensor = torch.load("../token_tensor.pt").to(args.device)
 
     print("finished loading token tensors")
     
@@ -382,7 +381,7 @@ if __name__ == '__main__':
         args.e2e
     )
     
-    save_path = os.path.join("results/" + args.output_dir, f"gpt2_{args.hook_loc}")
+    save_path = os.path.join("../results/" + args.output_dir, f"gpt2_{args.hook_loc}")
     os.makedirs(save_path, exist_ok=True)
     pos_label = 'all' if args.pos is None else args.pos
     
