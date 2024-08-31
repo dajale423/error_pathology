@@ -1,6 +1,6 @@
-# SAE Pathology
+# Sensitive Directions
 
-This codebase is used to explore the errors of SAEs to better understand what it may be missing out on.
+This codebase is used to explore the sensitive directions in GPT2-small. Please email me (dajale423@gmail.com) if you are interested in replicating some of my experiments.
 
 ## Set Up
 
